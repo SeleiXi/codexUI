@@ -86,6 +86,28 @@
                 <span class="sidebar-settings-label">Click to toggle dictation</span>
                 <span class="sidebar-settings-toggle" :class="{ 'is-on': dictationClickToToggle }" />
               </button>
+              <div class="sidebar-settings-divider" />
+              <div class="sidebar-settings-caption">
+                {{ activeProjectSettingsLabel }}
+              </div>
+              <button
+                class="sidebar-settings-row"
+                type="button"
+                :disabled="!activeProjectSettingsCwd"
+                @click="cycleProjectSandboxMode"
+              >
+                <span class="sidebar-settings-label">Sandbox</span>
+                <span class="sidebar-settings-value">{{ currentProjectSandboxLabel }}</span>
+              </button>
+              <button
+                class="sidebar-settings-row"
+                type="button"
+                :disabled="!activeProjectSettingsCwd"
+                @click="cycleProjectApprovalPolicy"
+              >
+                <span class="sidebar-settings-label">Approval</span>
+                <span class="sidebar-settings-value">{{ currentProjectApprovalLabel }}</span>
+              </button>
             </div>
           </Transition>
           <button class="sidebar-settings-button" type="button" @click="isSettingsOpen = !isSettingsOpen">
@@ -173,10 +195,11 @@
               <div class="composer-with-queue">
                 <QueuedMessages
                   :messages="selectedThreadQueuedMessages"
+                  @edit="onEditQueuedMessage"
                   @steer="steerQueuedMessage"
                   @delete="removeQueuedMessage"
                 />
-                <ThreadComposer :active-thread-id="composerThreadContextId"
+                <ThreadComposer ref="threadComposerRef" :active-thread-id="composerThreadContextId"
                   :cwd="composerCwd"
                   :models="availableModelIds"
                   :selected-model="selectedModelId" :selected-reasoning-effort="selectedReasoningEffort"
@@ -226,6 +249,7 @@ import {
   searchThreads,
 } from './api/codexGateway'
 import type { ReasoningEffort, ThreadScrollState } from './types/codex'
+import type { ComposerDraftPayload, ThreadComposerExposed } from './components/content/ThreadComposer.vue'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
 const worktreeName = import.meta.env.VITE_WORKTREE_NAME ?? 'unknown'
@@ -262,6 +286,8 @@ const {
   selectedThreadQueuedMessages,
   removeQueuedMessage,
   steerQueuedMessage,
+  getProjectExecutionPrefs,
+  updateProjectExecutionPrefs,
   setSelectedModelId,
   setSelectedReasoningEffort,
   respondToPendingServerRequest,
@@ -276,6 +302,7 @@ const {
 const route = useRoute()
 const router = useRouter()
 const { isMobile } = useMobile()
+const threadComposerRef = ref<ThreadComposerExposed | null>(null)
 const isRouteSyncInProgress = ref(false)
 const hasInitialized = ref(false)
 const newThreadCwd = ref('')
@@ -299,6 +326,8 @@ const SEND_WITH_ENTER_KEY = 'codex-web-local.send-with-enter.v1'
 const IN_PROGRESS_SEND_MODE_KEY = 'codex-web-local.in-progress-send-mode.v1'
 const DARK_MODE_KEY = 'codex-web-local.dark-mode.v1'
 const DICTATION_CLICK_TO_TOGGLE_KEY = 'codex-web-local.dictation-click-to-toggle.v1'
+const PROJECT_SANDBOX_MODE_ORDER = ['danger-full-access', 'workspace-write', 'read-only'] as const
+const PROJECT_APPROVAL_POLICY_ORDER = ['never', 'on-request', 'on-failure', 'untrusted'] as const
 const sendWithEnter = ref(loadBoolPref(SEND_WITH_ENTER_KEY, true))
 const inProgressSendMode = ref<'steer' | 'queue'>(loadInProgressSendModePref())
 const darkMode = ref<'system' | 'light' | 'dark'>(loadDarkModePref())
@@ -339,6 +368,26 @@ const composerThreadContextId = computed(() => (isHomeRoute.value ? '__new-threa
 const composerCwd = computed(() => {
   if (isHomeRoute.value) return newThreadCwd.value.trim()
   return selectedThread.value?.cwd?.trim() ?? ''
+})
+const activeProjectSettingsCwd = computed(() => composerCwd.value.trim())
+const activeProjectExecutionPrefs = computed(() => getProjectExecutionPrefs(activeProjectSettingsCwd.value))
+const activeProjectSettingsLabel = computed(() => {
+  const cwd = activeProjectSettingsCwd.value
+  if (!cwd) return 'Project runtime overrides appear after you choose a project.'
+  return `Project overrides: ${getPathLeafName(cwd)}`
+})
+const currentProjectSandboxLabel = computed(() => {
+  const mode = activeProjectExecutionPrefs.value.sandboxMode
+  if (mode === 'danger-full-access') return 'Full access'
+  if (mode === 'workspace-write') return 'Workspace write'
+  return 'Read only'
+})
+const currentProjectApprovalLabel = computed(() => {
+  const policy = activeProjectExecutionPrefs.value.approvalPolicy
+  if (policy === 'never') return 'Auto approve'
+  if (policy === 'on-request') return 'On request'
+  if (policy === 'on-failure') return 'On failure'
+  return 'Untrusted only'
 })
 const isSelectedThreadInProgress = computed(() => !isHomeRoute.value && selectedThread.value?.inProgress === true)
 const newThreadFolderOptions = computed(() => {
@@ -541,6 +590,26 @@ function onSubmitThreadMessage(payload: { text: string; imageUrls: string[]; fil
     return
   }
   void sendMessageToSelectedThread(text, payload.imageUrls, payload.skills, payload.mode, payload.fileAttachments)
+}
+
+function onEditQueuedMessage(messageId: string): void {
+  const message = selectedThreadQueuedMessages.value.find((item) => item.id === messageId)
+  const composer = threadComposerRef.value
+  if (!message || !composer) return
+
+  if (composer.hasUnsavedDraft()) {
+    const shouldReplace = window.confirm('Replace the current draft with this queued message for editing?')
+    if (!shouldReplace) return
+  }
+
+  const payload: ComposerDraftPayload = {
+    text: message.text,
+    imageUrls: [...message.imageUrls],
+    fileAttachments: message.fileAttachments.map((attachment) => ({ ...attachment })),
+    skills: message.skills.map((skill) => ({ ...skill })),
+  }
+  composer.hydrateDraft(payload)
+  removeQueuedMessage(messageId)
 }
 
 function onSelectNewThreadFolder(cwd: string): void {
@@ -807,6 +876,22 @@ function cycleDarkMode(): void {
 function toggleDictationClickToToggle(): void {
   dictationClickToToggle.value = !dictationClickToToggle.value
   window.localStorage.setItem(DICTATION_CLICK_TO_TOGGLE_KEY, dictationClickToToggle.value ? '1' : '0')
+}
+
+function cycleProjectSandboxMode(): void {
+  const cwd = activeProjectSettingsCwd.value
+  if (!cwd) return
+  const currentIndex = PROJECT_SANDBOX_MODE_ORDER.indexOf(activeProjectExecutionPrefs.value.sandboxMode)
+  const nextMode = PROJECT_SANDBOX_MODE_ORDER[(currentIndex + 1) % PROJECT_SANDBOX_MODE_ORDER.length]
+  updateProjectExecutionPrefs(cwd, { sandboxMode: nextMode })
+}
+
+function cycleProjectApprovalPolicy(): void {
+  const cwd = activeProjectSettingsCwd.value
+  if (!cwd) return
+  const currentIndex = PROJECT_APPROVAL_POLICY_ORDER.indexOf(activeProjectExecutionPrefs.value.approvalPolicy)
+  const nextPolicy = PROJECT_APPROVAL_POLICY_ORDER[(currentIndex + 1) % PROJECT_APPROVAL_POLICY_ORDER.length]
+  updateProjectExecutionPrefs(cwd, { approvalPolicy: nextPolicy })
 }
 
 function applyDarkMode(): void {
@@ -1162,8 +1247,20 @@ async function submitFirstMessageForNewThread(
   @apply flex items-center justify-between w-full px-3 py-2.5 text-sm text-zinc-700 border-0 bg-transparent transition hover:bg-zinc-50 cursor-pointer;
 }
 
+.sidebar-settings-row:disabled {
+  @apply cursor-not-allowed text-zinc-400 hover:bg-transparent;
+}
+
 .sidebar-settings-row + .sidebar-settings-row {
   @apply border-t border-zinc-100;
+}
+
+.sidebar-settings-divider {
+  @apply h-px bg-zinc-100;
+}
+
+.sidebar-settings-caption {
+  @apply px-3 py-2 text-[11px] uppercase tracking-[0.12em] text-zinc-500 bg-zinc-50/80;
 }
 
 .sidebar-settings-label {
