@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { mkdtemp, readFile, readdir, rm, mkdir, stat, cp, lstat, readlink, symlink } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { homedir } from 'node:os'
@@ -53,6 +53,8 @@ type PendingServerRequest = {
   params: unknown
   receivedAtIso: string
 }
+
+const AUTH_STATE_POLL_MS = 3000
 
 type ThreadSearchDocument = {
   id: string
@@ -390,9 +392,33 @@ function getCodexAuthPath(): string {
 }
 
 type CodexAuth = {
+  email?: string
+  email_address?: string
+  userId?: string
+  user_id?: string
   tokens?: {
     access_token?: string
+    refresh_token?: string
     account_id?: string
+  }
+}
+
+function readCodexAuthFingerprint(): string {
+  try {
+    const raw = readFileSync(getCodexAuthPath(), 'utf8')
+    const auth = JSON.parse(raw) as CodexAuth
+    const identity =
+      auth.tokens?.account_id?.trim() ||
+      auth.tokens?.refresh_token?.trim() ||
+      auth.user_id?.trim() ||
+      auth.userId?.trim() ||
+      auth.email_address?.trim() ||
+      auth.email?.trim() ||
+      auth.tokens?.access_token?.trim() ||
+      '__present__'
+    return createHash('sha1').update(identity).digest('hex')
+  } catch {
+    return '__missing__'
   }
 }
 
@@ -754,6 +780,8 @@ class AppServerProcess {
   private readBuffer = ''
   private nextId = 1
   private stopping = false
+  private authFingerprint = readCodexAuthFingerprint()
+  private authMonitorTimer: ReturnType<typeof setInterval> | null = null
   private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }>()
   private readonly notificationListeners = new Set<(value: { method: string; params: unknown }) => void>()
   private readonly pendingServerRequests = new Map<number, PendingServerRequest>()
@@ -765,10 +793,39 @@ class AppServerProcess {
     'sandbox_mode="danger-full-access"',
   ]
 
+  private ensureAuthMonitor(): void {
+    if (this.authMonitorTimer !== null) return
+
+    this.authMonitorTimer = setInterval(() => {
+      this.syncAuthState(true)
+    }, AUTH_STATE_POLL_MS)
+    this.authMonitorTimer.unref?.()
+  }
+
+  private syncAuthState(emitNotification: boolean): void {
+    const nextFingerprint = readCodexAuthFingerprint()
+    if (nextFingerprint === this.authFingerprint) return
+
+    this.authFingerprint = nextFingerprint
+    const hadActiveProcess = this.process !== null || this.initialized || this.initializePromise !== null
+    if (!hadActiveProcess) return
+
+    this.dispose()
+    if (emitNotification) {
+      this.emitNotification({
+        method: 'auth/changed',
+        params: {},
+      })
+    }
+  }
+
   private start(): void {
+    this.ensureAuthMonitor()
+    this.syncAuthState(false)
     if (this.process) return
 
     this.stopping = false
+    this.authFingerprint = readCodexAuthFingerprint()
     const codexCommand = resolveCodexCommand() ?? 'codex'
     const invocation = getSpawnInvocation(codexCommand, this.appServerArgs)
     const proc = spawn(invocation.cmd, invocation.args, { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -1004,6 +1061,11 @@ class AppServerProcess {
   }
 
   dispose(): void {
+    if (this.authMonitorTimer !== null) {
+      clearInterval(this.authMonitorTimer)
+      this.authMonitorTimer = null
+    }
+
     if (!this.process) return
 
     const proc = this.process

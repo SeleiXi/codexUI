@@ -2097,9 +2097,35 @@ export function useDesktopState() {
     return false
   }
 
+  function resetStateForAuthChange(): void {
+    persistedMessagesByThreadId.value = {}
+    liveAgentMessagesByThreadId.value = {}
+    liveReasoningTextByThreadId.value = {}
+    liveCommandsByThreadId.value = {}
+    inProgressById.value = {}
+    loadedVersionByThreadId.value = {}
+    loadedMessagesByThreadId.value = {}
+    resumedThreadById.value = {}
+    turnSummaryByThreadId.value = {}
+    turnActivityByThreadId.value = {}
+    turnErrorByThreadId.value = {}
+    activeTurnIdByThreadId.value = {}
+    pendingServerRequestsByThreadId.value = {}
+    pendingTurnRequestByThreadId.value = {}
+    accountRateLimitSnapshots.value = []
+    error.value = ''
+    pendingTurnStartsById.clear()
+    fallbackRetryInFlightThreadIds.clear()
+  }
+
   function applyRealtimeUpdates(notification: RpcNotification): void {
     if (handleServerRequestNotification(notification)) {
       return
+    }
+
+    if (notification.method === 'auth/changed') {
+      resetStateForAuthChange()
+      scheduleRateLimitRefresh()
     }
 
     if (notification.method === 'account/rateLimits/updated') {
@@ -2342,10 +2368,14 @@ export function useDesktopState() {
     }
 
     const method = notification.method
+    if (method === 'auth/changed') {
+      pendingThreadsRefresh = true
+    }
     if (
       method.startsWith('thread/') ||
       method.startsWith('turn/') ||
-      method.startsWith('item/')
+      method.startsWith('item/') ||
+      method === 'auth/changed'
     ) {
       pendingThreadsRefresh = true
     }
