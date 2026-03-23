@@ -754,6 +754,7 @@ export function useDesktopState() {
   const liveAgentMessagesByThreadId = ref<Record<string, UiMessage[]>>({})
   const liveReasoningTextByThreadId = ref<Record<string, string>>({})
   const liveCommandsByThreadId = ref<Record<string, UiMessage[]>>({})
+  const liveCommandAnchorIdsByThreadId = ref<Record<string, Record<string, string | null>>>({})
   const inProgressById = ref<Record<string, boolean>>({})
   type PendingTurnRequest = {
     text: string
@@ -831,8 +832,8 @@ export function useDesktopState() {
     if (!threadId) return null
 
     const activity = turnActivityByThreadId.value[threadId]
-    const reasoningText = (liveReasoningTextByThreadId.value[threadId] ?? '').trim()
     const errorText = (turnErrorByThreadId.value[threadId]?.message ?? '').trim()
+    const reasoningText = ''
 
     if (!activity && !reasoningText && !errorText) return null
     return {
@@ -842,19 +843,119 @@ export function useDesktopState() {
       errorText,
     }
   })
-  const messages = computed<UiMessage[]>(() => {
-    const threadId = selectedThreadId.value
-    if (!threadId) return []
-
+  function buildNonCommandTimelineMessages(threadId: string): UiMessage[] {
     const persisted = persistedMessagesByThreadId.value[threadId] ?? []
     const optimisticUsers = optimisticUserMessagesByThreadId.value[threadId] ?? []
+    const liveReasoningText = (liveReasoningTextByThreadId.value[threadId] ?? '').trim()
+    const liveReasoning = liveReasoningText.length > 0
+      ? [{
+          id: activeReasoningItemId ? liveReasoningMessageId(activeReasoningItemId) : `${threadId}:live-reasoning`,
+          role: 'system' as const,
+          text: liveReasoningText,
+          messageType: 'reasoning',
+        }]
+      : []
     const liveAgent = liveAgentMessagesByThreadId.value[threadId] ?? []
-    const liveCommands = liveCommandsByThreadId.value[threadId] ?? []
-    const combined = [...persisted, ...optimisticUsers, ...liveCommands, ...liveAgent]
+    return [...persisted, ...optimisticUsers, ...liveReasoning, ...liveAgent]
+  }
 
+  function insertLiveCommandsIntoTimeline(threadId: string, baseMessages: UiMessage[]): UiMessage[] {
+    const liveCommands = liveCommandsByThreadId.value[threadId] ?? []
+    if (liveCommands.length === 0) return baseMessages
+
+    const anchors = liveCommandAnchorIdsByThreadId.value[threadId] ?? {}
+    const ordered = [...baseMessages]
+
+    for (const message of liveCommands) {
+      const existingIndex = ordered.findIndex((row) => row.id === message.id)
+      if (existingIndex >= 0) {
+        ordered.splice(existingIndex, 1, message)
+        continue
+      }
+
+      const anchorId = anchors[message.id]
+      if (!anchorId) {
+        ordered.push(message)
+        continue
+      }
+
+      const anchorIndex = ordered.findIndex((row) => row.id === anchorId)
+      if (anchorIndex < 0) {
+        ordered.push(message)
+        continue
+      }
+
+      ordered.splice(anchorIndex + 1, 0, message)
+    }
+
+    return ordered
+  }
+
+  function buildTimelineMessages(threadId: string): UiMessage[] {
+    const combined = insertLiveCommandsIntoTimeline(threadId, buildNonCommandTimelineMessages(threadId))
     const summary = turnSummaryByThreadId.value[threadId]
     if (!summary) return combined
     return insertTurnSummaryMessage(combined, summary)
+  }
+
+  function currentTimelineTailMessageId(threadId: string): string | null {
+    const timeline = buildTimelineMessages(threadId)
+    const last = timeline[timeline.length - 1]
+    return last?.id ?? null
+  }
+
+  function setLiveCommandAnchorId(threadId: string, messageId: string, anchorId: string | null): void {
+    const previous = liveCommandAnchorIdsByThreadId.value[threadId] ?? {}
+    if (previous[messageId] === anchorId) return
+    liveCommandAnchorIdsByThreadId.value = {
+      ...liveCommandAnchorIdsByThreadId.value,
+      [threadId]: {
+        ...previous,
+        [messageId]: anchorId,
+      },
+    }
+  }
+
+  function setLiveCommandsForThread(threadId: string, nextMessages: UiMessage[]): void {
+    const previous = liveCommandsByThreadId.value[threadId] ?? []
+    if (!areMessageArraysEqual(previous, nextMessages)) {
+      if (nextMessages.length === 0) {
+        liveCommandsByThreadId.value = omitKey(liveCommandsByThreadId.value, threadId)
+      } else {
+        liveCommandsByThreadId.value = { ...liveCommandsByThreadId.value, [threadId]: nextMessages }
+      }
+    }
+
+    const previousAnchors = liveCommandAnchorIdsByThreadId.value[threadId] ?? {}
+    const nextIds = new Set(nextMessages.map((message) => message.id))
+    const nextAnchors = Object.fromEntries(
+      Object.entries(previousAnchors).filter(([messageId]) => nextIds.has(messageId)),
+    )
+
+    if (Object.keys(nextAnchors).length === 0) {
+      if (threadId in liveCommandAnchorIdsByThreadId.value) {
+        liveCommandAnchorIdsByThreadId.value = omitKey(liveCommandAnchorIdsByThreadId.value, threadId)
+      }
+      return
+    }
+
+    const previousKeys = Object.keys(previousAnchors)
+    const nextKeys = Object.keys(nextAnchors)
+    const isSame =
+      previousKeys.length === nextKeys.length &&
+      nextKeys.every((key) => previousAnchors[key] === nextAnchors[key])
+    if (isSame) return
+
+    liveCommandAnchorIdsByThreadId.value = {
+      ...liveCommandAnchorIdsByThreadId.value,
+      [threadId]: nextAnchors,
+    }
+  }
+
+  const messages = computed<UiMessage[]>(() => {
+    const threadId = selectedThreadId.value
+    if (!threadId) return []
+    return buildTimelineMessages(threadId)
   })
 
   function setSelectedThreadId(nextThreadId: string): void {
@@ -1018,9 +1119,7 @@ export function useDesktopState() {
         setPersistedMessagesForThread(threadId, rolledBackMessages)
         setLiveAgentMessagesForThread(threadId, [])
         clearLiveReasoningForThread(threadId)
-        if (liveCommandsByThreadId.value[threadId]) {
-          liveCommandsByThreadId.value = omitKey(liveCommandsByThreadId.value, threadId)
-        }
+        setLiveCommandsForThread(threadId, [])
       } catch {
         // If rollback fails, continue with retry rather than dropping the turn.
       }
@@ -1244,6 +1343,7 @@ export function useDesktopState() {
     optimisticUserMessagesByThreadId.value = pruneThreadStateMap(optimisticUserMessagesByThreadId.value, activeThreadIds)
     liveReasoningTextByThreadId.value = pruneThreadStateMap(liveReasoningTextByThreadId.value, activeThreadIds)
     liveCommandsByThreadId.value = pruneThreadStateMap(liveCommandsByThreadId.value, activeThreadIds)
+    liveCommandAnchorIdsByThreadId.value = pruneThreadStateMap(liveCommandAnchorIdsByThreadId.value, activeThreadIds)
     turnSummaryByThreadId.value = pruneThreadStateMap(turnSummaryByThreadId.value, activeThreadIds)
     turnActivityByThreadId.value = pruneThreadStateMap(turnActivityByThreadId.value, activeThreadIds)
     turnErrorByThreadId.value = pruneThreadStateMap(turnErrorByThreadId.value, activeThreadIds)
@@ -2127,9 +2227,12 @@ export function useDesktopState() {
 
   function upsertLiveCommand(threadId: string, msg: UiMessage): void {
     const previous = liveCommandsByThreadId.value[threadId] ?? []
+    if (!previous.some((message) => message.id === msg.id)) {
+      setLiveCommandAnchorId(threadId, msg.id, currentTimelineTailMessageId(threadId))
+    }
     const next = upsertMessage(previous, msg)
     if (next === previous) return
-    liveCommandsByThreadId.value = { ...liveCommandsByThreadId.value, [threadId]: next }
+    setLiveCommandsForThread(threadId, next)
   }
 
   function removeLiveCommandsPersistedIn(threadId: string, persistedMessages: UiMessage[]): void {
@@ -2138,11 +2241,7 @@ export function useDesktopState() {
     const persistedIds = new Set(persistedMessages.map((m) => m.id))
     const next = current.filter((m) => !persistedIds.has(m.id))
     if (next.length === current.length) return
-    if (next.length === 0) {
-      liveCommandsByThreadId.value = omitKey(liveCommandsByThreadId.value, threadId)
-    } else {
-      liveCommandsByThreadId.value = { ...liveCommandsByThreadId.value, [threadId]: next }
-    }
+    setLiveCommandsForThread(threadId, next)
   }
 
   function isAgentContentEvent(notification: RpcNotification): boolean {
@@ -2167,6 +2266,7 @@ export function useDesktopState() {
     liveAgentMessagesByThreadId.value = {}
     liveReasoningTextByThreadId.value = {}
     liveCommandsByThreadId.value = {}
+    liveCommandAnchorIdsByThreadId.value = {}
     inProgressById.value = {}
     loadedVersionByThreadId.value = {}
     loadedMessagesByThreadId.value = {}
@@ -2402,16 +2502,13 @@ export function useDesktopState() {
         })
       }
       activeReasoningItemId = ''
-      clearLiveReasoningForThread(notificationThreadId)
     }
 
     if (notification.method === 'turn/completed') {
       activeReasoningItemId = ''
       shouldAutoScrollOnNextAgentEvent = false
       clearLiveReasoningForThread(notificationThreadId)
-      if (liveCommandsByThreadId.value[notificationThreadId]) {
-        liveCommandsByThreadId.value = omitKey(liveCommandsByThreadId.value, notificationThreadId)
-      }
+      setLiveCommandsForThread(notificationThreadId, [])
       const completedThreadId = extractThreadIdFromNotification(notification)
       if (completedThreadId) {
         setThreadInProgress(completedThreadId, false)
@@ -2974,9 +3071,7 @@ export function useDesktopState() {
       setPersistedMessagesForThread(threadId, nextMessages)
       setLiveAgentMessagesForThread(threadId, [])
       clearLiveReasoningForThread(threadId)
-      if (liveCommandsByThreadId.value[threadId]) {
-        liveCommandsByThreadId.value = omitKey(liveCommandsByThreadId.value, threadId)
-      }
+      setLiveCommandsForThread(threadId, [])
       setTurnSummaryForThread(threadId, null)
       setTurnActivityForThread(threadId, null)
       setTurnErrorForThread(threadId, null)
@@ -3252,6 +3347,7 @@ export function useDesktopState() {
     liveAgentMessagesByThreadId.value = {}
     liveReasoningTextByThreadId.value = {}
     liveCommandsByThreadId.value = {}
+    liveCommandAnchorIdsByThreadId.value = {}
     turnActivityByThreadId.value = {}
     turnSummaryByThreadId.value = {}
     turnErrorByThreadId.value = {}

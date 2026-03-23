@@ -51,6 +51,26 @@ function buildSystemMessage(id: string, messageType: string, lines: Array<string
   ]
 }
 
+function buildReasoningMessage(item: Extract<ThreadItem, { type: 'reasoning' }>): UiMessage[] {
+  const contentLines = Array.isArray(item.content)
+    ? item.content.filter((line): line is string => typeof line === 'string' && line.trim().length > 0)
+    : []
+  const summaryLines = Array.isArray(item.summary)
+    ? item.summary.filter((line): line is string => typeof line === 'string' && line.trim().length > 0)
+    : []
+  const text = (contentLines.length > 0 ? contentLines : summaryLines).join('\n\n').trim()
+  if (!text) return []
+  return [
+    {
+      id: item.id,
+      role: 'system',
+      text,
+      messageType: 'reasoning',
+      rawPayload: toRawPayload(item),
+    },
+  ]
+}
+
 const FILE_ATTACHMENT_LINE = /^##\s+(.+?):\s+(.+?)\s*$/
 const FILES_MENTIONED_MARKER = /^#\s*files mentioned by the user\s*:?\s*$/i
 
@@ -165,7 +185,7 @@ function toUiMessages(item: ThreadItem): UiMessage[] {
   }
 
   if (item.type === 'reasoning') {
-    return []
+    return buildReasoningMessage(item)
   }
 
   if (item.type === 'commandExecution') {
