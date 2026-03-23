@@ -2,7 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { RequestHandler, Request, Response, NextFunction } from 'express'
 
-const TOKEN_COOKIE = 'codex_web_local_token'
+const TOKEN_COOKIE = 'portal_session'
 
 function isLocalhostRequest(req: Request): boolean {
   const remote = req.socket.remoteAddress ?? ''
@@ -40,7 +40,14 @@ function isLocalhostRemote(remote: string): boolean {
 
 function isLocalhostHost(host: string): boolean {
   const normalized = host.toLowerCase()
-  return normalized.startsWith('localhost:') || normalized === 'localhost' || normalized.startsWith('127.0.0.1:')
+  return (
+    normalized.startsWith('localhost:') ||
+    normalized === 'localhost' ||
+    normalized.startsWith('127.0.0.1:') ||
+    normalized === '127.0.0.1' ||
+    normalized.startsWith('[::1]:') ||
+    normalized === '[::1]'
+  )
 }
 
 function isAuthorizedByRequestLike(
@@ -50,7 +57,7 @@ function isAuthorizedByRequestLike(
   validTokens: Set<string>,
 ): boolean {
   const remote = remoteAddress ?? ''
-  if (isLocalhostRemote(remote) || isLocalhostHost(hostHeader ?? '')) {
+  if (isLocalhostRemote(remote) && isLocalhostHost(hostHeader ?? '')) {
     return true
   }
 
@@ -64,7 +71,7 @@ const LOGIN_PAGE_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Codex Web Local &mdash; Login</title>
+<title>Workspace Portal</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0a0a;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem}
@@ -80,12 +87,12 @@ button:hover{background:#2563eb}
 </head>
 <body>
 <div class="card">
-<h1>Codex Web Local</h1>
+<h1>Workspace Portal</h1>
 <form id="f">
-<label for="pw">Password</label>
+<label for="pw">Access Code</label>
 <input id="pw" name="password" type="password" autocomplete="current-password" autofocus required>
-<button type="submit">Sign in</button>
-<p class="error" id="err">Incorrect password</p>
+<button type="submit">Continue</button>
+<p class="error" id="err">Incorrect access code</p>
 </form>
 </div>
 <script>

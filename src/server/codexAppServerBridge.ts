@@ -1,7 +1,7 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
 import { mkdtemp, readFile, readdir, rm, mkdir, stat, cp, lstat, readlink, symlink } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { homedir } from 'node:os'
@@ -53,6 +53,8 @@ type PendingServerRequest = {
   params: unknown
   receivedAtIso: string
 }
+
+const AUTH_STATE_POLL_MS = 3000
 
 type ThreadSearchDocument = {
   id: string
@@ -190,6 +192,72 @@ function getCodexHomeDir(): string {
   return codexHome && codexHome.length > 0 ? codexHome : join(homedir(), '.codex')
 }
 
+function quoteCmdExeArg(value: string): string {
+  const normalized = value.replace(/"/g, '""')
+  if (!/[\s"]/u.test(normalized)) {
+    return normalized
+  }
+  return `"${normalized}"`
+}
+
+function getSpawnInvocation(command: string, args: string[] = []): { cmd: string; args: string[] } {
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
+    return {
+      cmd: 'cmd.exe',
+      args: ['/d', '/s', '/c', [quoteCmdExeArg(command), ...args.map((arg) => quoteCmdExeArg(arg))].join(' ')],
+    }
+  }
+
+  return { cmd: command, args }
+}
+
+function canRun(command: string, args: string[] = []): boolean {
+  const invocation = getSpawnInvocation(command, args)
+  const result = spawnSync(invocation.cmd, invocation.args, { stdio: 'ignore' })
+  return result.status === 0
+}
+
+function getUserNpmPrefix(): string {
+  return join(homedir(), '.npm-global')
+}
+
+function resolveCodexCommand(): string | null {
+  if (canRun('codex', ['--version'])) {
+    return 'codex'
+  }
+
+  if (process.platform === 'win32') {
+    const windowsCandidates = [
+      process.env.APPDATA ? join(process.env.APPDATA, 'npm', 'codex.cmd') : '',
+      join(homedir(), '.local', 'bin', 'codex.cmd'),
+      join(getUserNpmPrefix(), 'bin', 'codex.cmd'),
+    ].filter(Boolean)
+
+    for (const candidate of windowsCandidates) {
+      if (existsSync(candidate) && canRun(candidate, ['--version'])) {
+        return candidate
+      }
+    }
+  }
+
+  const userCandidate = join(getUserNpmPrefix(), 'bin', 'codex')
+  if (existsSync(userCandidate) && canRun(userCandidate, ['--version'])) {
+    return userCandidate
+  }
+
+  const prefix = process.env.PREFIX?.trim()
+  if (!prefix) {
+    return null
+  }
+
+  const candidate = join(prefix, 'bin', 'codex')
+  if (existsSync(candidate) && canRun(candidate, ['--version'])) {
+    return candidate
+  }
+
+  return null
+}
+
 function getSkillsInstallDir(): string {
   return join(getCodexHomeDir(), 'skills')
 }
@@ -324,9 +392,33 @@ function getCodexAuthPath(): string {
 }
 
 type CodexAuth = {
+  email?: string
+  email_address?: string
+  userId?: string
+  user_id?: string
   tokens?: {
     access_token?: string
+    refresh_token?: string
     account_id?: string
+  }
+}
+
+function readCodexAuthFingerprint(): string {
+  try {
+    const raw = readFileSync(getCodexAuthPath(), 'utf8')
+    const auth = JSON.parse(raw) as CodexAuth
+    const identity =
+      auth.tokens?.account_id?.trim() ||
+      auth.tokens?.refresh_token?.trim() ||
+      auth.user_id?.trim() ||
+      auth.userId?.trim() ||
+      auth.email_address?.trim() ||
+      auth.email?.trim() ||
+      auth.tokens?.access_token?.trim() ||
+      '__present__'
+    return createHash('sha1').update(identity).digest('hex')
+  } catch {
+    return '__missing__'
   }
 }
 
@@ -344,6 +436,10 @@ async function readCodexAuth(): Promise<{ accessToken: string; accountId?: strin
 
 function getCodexGlobalStatePath(): string {
   return join(getCodexHomeDir(), '.codex-global-state.json')
+}
+
+function getCodexSessionIndexPath(): string {
+  return join(getCodexHomeDir(), 'session_index.jsonl')
 }
 
 type ThreadTitleCache = { titles: Record<string, string>; order: string[] }
@@ -378,6 +474,63 @@ function removeFromThreadTitleCache(cache: ThreadTitleCache, id: string): Thread
   return { titles, order: cache.order.filter((o) => o !== id) }
 }
 
+type SessionIndexThreadTitle = {
+  id: string
+  title: string
+  updatedAtMs: number
+}
+
+function normalizeSessionIndexThreadTitle(value: unknown): SessionIndexThreadTitle | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const id = typeof record.id === 'string' ? record.id.trim() : ''
+  const title = typeof record.thread_name === 'string' ? record.thread_name.trim() : ''
+  const updatedAtIso = typeof record.updated_at === 'string' ? record.updated_at.trim() : ''
+  const updatedAtMs = updatedAtIso ? Date.parse(updatedAtIso) : Number.NaN
+
+  if (!id || !title) return null
+  return {
+    id,
+    title,
+    updatedAtMs: Number.isFinite(updatedAtMs) ? updatedAtMs : 0,
+  }
+}
+
+function trimThreadTitleCache(cache: ThreadTitleCache): ThreadTitleCache {
+  const titles = { ...cache.titles }
+  const order = cache.order.filter((id) => {
+    if (!titles[id]) return false
+    return true
+  }).slice(0, MAX_THREAD_TITLES)
+
+  for (const id of Object.keys(titles)) {
+    if (!order.includes(id)) {
+      delete titles[id]
+    }
+  }
+
+  return { titles, order }
+}
+
+function mergeThreadTitleCaches(base: ThreadTitleCache, overlay: ThreadTitleCache): ThreadTitleCache {
+  const titles = { ...base.titles, ...overlay.titles }
+  const order: string[] = []
+
+  for (const id of [...overlay.order, ...base.order]) {
+    if (!titles[id] || order.includes(id)) continue
+    order.push(id)
+  }
+
+  for (const id of Object.keys(titles)) {
+    if (!order.includes(id)) {
+      order.push(id)
+    }
+  }
+
+  return trimThreadTitleCache({ titles, order })
+}
+
 async function readThreadTitleCache(): Promise<ThreadTitleCache> {
   const statePath = getCodexGlobalStatePath()
   try {
@@ -402,6 +555,49 @@ async function writeThreadTitleCache(cache: ThreadTitleCache): Promise<void> {
   await writeFile(statePath, JSON.stringify(payload), 'utf8')
 }
 
+async function readThreadTitlesFromSessionIndex(): Promise<ThreadTitleCache> {
+  try {
+    const raw = await readFile(getCodexSessionIndexPath(), 'utf8')
+    const latestById = new Map<string, SessionIndexThreadTitle>()
+
+    for (const line of raw.split(/\r?\n/u)) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+
+      try {
+        const entry = normalizeSessionIndexThreadTitle(JSON.parse(trimmed) as unknown)
+        if (!entry) continue
+
+        const previous = latestById.get(entry.id)
+        if (!previous || entry.updatedAtMs >= previous.updatedAtMs) {
+          latestById.set(entry.id, entry)
+        }
+      } catch {
+        // Skip malformed lines and keep scanning the rest of the index.
+      }
+    }
+
+    const entries = Array.from(latestById.values()).sort((first, second) => second.updatedAtMs - first.updatedAtMs)
+    const titles: Record<string, string> = {}
+    const order: string[] = []
+    for (const entry of entries) {
+      titles[entry.id] = entry.title
+      order.push(entry.id)
+    }
+
+    return trimThreadTitleCache({ titles, order })
+  } catch {
+    return { titles: {}, order: [] }
+  }
+}
+
+async function readMergedThreadTitleCache(): Promise<ThreadTitleCache> {
+  const [sessionIndexCache, persistedCache] = await Promise.all([
+    readThreadTitlesFromSessionIndex(),
+    readThreadTitleCache(),
+  ])
+  return mergeThreadTitleCaches(sessionIndexCache, persistedCache)
+}
 async function readPinnedThreadIds(): Promise<string[]> {
   const statePath = getCodexGlobalStatePath()
   try {
@@ -583,6 +779,8 @@ class AppServerProcess {
   private readBuffer = ''
   private nextId = 1
   private stopping = false
+  private authFingerprint = readCodexAuthFingerprint()
+  private authMonitorTimer: ReturnType<typeof setInterval> | null = null
   private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }>()
   private readonly notificationListeners = new Set<(value: { method: string; params: unknown }) => void>()
   private readonly pendingServerRequests = new Map<number, PendingServerRequest>()
@@ -594,11 +792,42 @@ class AppServerProcess {
     'sandbox_mode="danger-full-access"',
   ]
 
+  private ensureAuthMonitor(): void {
+    if (this.authMonitorTimer !== null) return
+
+    this.authMonitorTimer = setInterval(() => {
+      this.syncAuthState(true)
+    }, AUTH_STATE_POLL_MS)
+    this.authMonitorTimer.unref?.()
+  }
+
+  private syncAuthState(emitNotification: boolean): void {
+    const nextFingerprint = readCodexAuthFingerprint()
+    if (nextFingerprint === this.authFingerprint) return
+
+    this.authFingerprint = nextFingerprint
+    const hadActiveProcess = this.process !== null || this.initialized || this.initializePromise !== null
+    if (!hadActiveProcess) return
+
+    this.dispose()
+    if (emitNotification) {
+      this.emitNotification({
+        method: 'auth/changed',
+        params: {},
+      })
+    }
+  }
+
   private start(): void {
+    this.ensureAuthMonitor()
+    this.syncAuthState(false)
     if (this.process) return
 
     this.stopping = false
-    const proc = spawn('codex', this.appServerArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
+    this.authFingerprint = readCodexAuthFingerprint()
+    const codexCommand = resolveCodexCommand() ?? 'codex'
+    const invocation = getSpawnInvocation(codexCommand, this.appServerArgs)
+    const proc = spawn(invocation.cmd, invocation.args, { stdio: ['pipe', 'pipe', 'pipe'] })
     this.process = proc
 
     proc.stdout.setEncoding('utf8')
@@ -831,6 +1060,11 @@ class AppServerProcess {
   }
 
   dispose(): void {
+    if (this.authMonitorTimer !== null) {
+      clearInterval(this.authMonitorTimer)
+      this.authMonitorTimer = null
+    }
+
     if (!this.process) return
 
     const proc = this.process
@@ -878,7 +1112,9 @@ class MethodCatalog {
 
   private async runGenerateSchemaCommand(outDir: string): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      const process = spawn('codex', ['app-server', 'generate-json-schema', '--out', outDir], {
+      const codexCommand = resolveCodexCommand() ?? 'codex'
+      const invocation = getSpawnInvocation(codexCommand, ['app-server', 'generate-json-schema', '--out', outDir])
+      const process = spawn(invocation.cmd, invocation.args, {
         stdio: ['ignore', 'ignore', 'pipe'],
       })
 
@@ -1392,7 +1628,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/thread-titles') {
-        const cache = await readThreadTitleCache()
+        const cache = await readMergedThreadTitleCache()
         setJson(res, 200, { data: cache })
         return
       }
