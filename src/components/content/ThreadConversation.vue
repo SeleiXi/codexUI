@@ -3,7 +3,7 @@
     <p v-if="isLoading" class="conversation-loading">Loading messages...</p>
 
     <p
-      v-else-if="messages.length === 0 && pendingRequests.length === 0 && !liveOverlay"
+      v-else-if="visibleMessages.length === 0 && pendingRequests.length === 0 && !liveOverlay"
       class="conversation-empty"
     >
       No messages in this thread yet.
@@ -84,7 +84,7 @@
       </li>
 
       <li
-        v-for="message in messages"
+        v-for="message in visibleMessages"
         :key="message.id"
         class="conversation-item"
         :class="{ 'conversation-item-actionable': canShowMessageActions(message) }"
@@ -159,7 +159,7 @@
                   </button>
                   <div v-if="isWorkedExpanded(message)" class="worked-details">
                     <div
-                      v-for="cmd in getCommandsForWorked(messages, messages.indexOf(message))"
+                      v-for="cmd in getCommandsForWorked(props.messages, props.messages.indexOf(message))"
                       :key="`worked-cmd-${cmd.id}`"
                       class="worked-cmd-item"
                     >
@@ -290,7 +290,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { ThreadScrollState, UiLiveOverlay, UiMessage, UiServerRequest } from '../../types/codex'
 import IconTablerX from '../icons/IconTablerX.vue'
 import IconTablerArrowBackUp from '../icons/IconTablerArrowBackUp.vue'
@@ -303,6 +303,24 @@ const prevCommandStatuses = ref<Record<string, string>>({})
 
 function isCommandMessage(message: UiMessage): boolean {
   return message.messageType === 'commandExecution' && !!message.commandExecution
+}
+
+function isTrailingAuxiliaryMessage(message: UiMessage): boolean {
+  if (message.messageType === 'toolInvocation') return true
+  if (!isCommandMessage(message)) return false
+  return message.commandExecution?.status !== 'inProgress'
+}
+
+function isAuxiliaryTimelineMessage(message: UiMessage): boolean {
+  return message.messageType === 'toolInvocation' || isCommandMessage(message)
+}
+
+function shouldKeepTimelineMessage(message: UiMessage, index: number, messages: UiMessage[]): boolean {
+  if (!isTrailingAuxiliaryMessage(message)) return true
+  for (let nextIndex = index + 1; nextIndex < messages.length; nextIndex += 1) {
+    if (!isAuxiliaryTimelineMessage(messages[nextIndex])) return true
+  }
+  return false
 }
 
 function isCommandExpanded(message: UiMessage): boolean {
@@ -386,6 +404,10 @@ const props = defineProps<{
   isTurnInProgress?: boolean
   isRollingBack?: boolean
 }>()
+
+const visibleMessages = computed<UiMessage[]>(() =>
+  props.messages.filter((message, index, messages) => shouldKeepTimelineMessage(message, index, messages)),
+)
 
 const emit = defineEmits<{
   updateScrollState: [payload: { threadId: string; state: ThreadScrollState }]
@@ -1077,7 +1099,7 @@ function canRollbackMessage(message: UiMessage): boolean {
 }
 
 function canCopyMessage(message: UiMessage): boolean {
-  if (message.role !== 'user' && message.role !== 'assistant') return false
+  if (message.role !== 'user' && message.role !== 'assistant' && message.messageType !== 'reasoning') return false
   return message.text.trim().length > 0
 }
 
@@ -1225,9 +1247,7 @@ async function scheduleScrollRestore(): Promise<void> {
 
 watch(
   () => props.messages,
-  async (next) => {
-    if (props.isLoading) return
-
+  (next) => {
     for (const m of next) {
       if (m.messageType !== 'commandExecution' || !m.commandExecution) continue
       const prev = prevCommandStatuses.value[m.id]
@@ -1237,6 +1257,13 @@ watch(
       }
       prevCommandStatuses.value[m.id] = cur
     }
+  },
+)
+
+watch(
+  visibleMessages,
+  async () => {
+    if (props.isLoading) return
 
     await scheduleScrollRestore()
   },
