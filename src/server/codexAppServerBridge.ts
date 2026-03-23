@@ -507,6 +507,31 @@ async function readMergedThreadTitleCache(): Promise<ThreadTitleCache> {
   return mergeThreadTitleCaches(sessionIndexCache, persistedCache)
 }
 
+async function readPinnedThreadIds(): Promise<string[]> {
+  const statePath = getCodexGlobalStatePath()
+  try {
+    const raw = await readFile(statePath, 'utf8')
+    const payload = asRecord(JSON.parse(raw)) ?? {}
+    return normalizeStringArray(payload['pinned-thread-ids'])
+  } catch {
+    return []
+  }
+}
+
+async function writePinnedThreadIds(threadIds: string[]): Promise<void> {
+  const statePath = getCodexGlobalStatePath()
+  let payload: Record<string, unknown> = {}
+  try {
+    const raw = await readFile(statePath, 'utf8')
+    payload = asRecord(JSON.parse(raw)) ?? {}
+  } catch {
+    payload = {}
+  }
+
+  payload['pinned-thread-ids'] = normalizeStringArray(threadIds)
+  await writeFile(statePath, JSON.stringify(payload), 'utf8')
+}
+
 async function readWorkspaceRootsState(): Promise<WorkspaceRootsState> {
   const statePath = getCodexGlobalStatePath()
   let payload: Record<string, unknown> = {}
@@ -1477,6 +1502,12 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         return
       }
 
+      if (req.method === 'GET' && url.pathname === '/codex-api/pinned-threads') {
+        const threadIds = await readPinnedThreadIds()
+        setJson(res, 200, { data: threadIds })
+        return
+      }
+
       if (req.method === 'POST' && url.pathname === '/codex-api/thread-search') {
         const payload = asRecord(await readJsonBody(req))
         const query = typeof payload?.query === 'string' ? payload.query.trim() : ''
@@ -1508,6 +1539,13 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const cache = await readThreadTitleCache()
         const next = title ? updateThreadTitleCache(cache, id, title) : removeFromThreadTitleCache(cache, id)
         await writeThreadTitleCache(next)
+        setJson(res, 200, { ok: true })
+        return
+      }
+
+      if (req.method === 'PUT' && url.pathname === '/codex-api/pinned-threads') {
+        const payload = asRecord(await readJsonBody(req))
+        await writePinnedThreadIds(normalizeStringArray(payload?.threadIds))
         setJson(res, 200, { ok: true })
         return
       }
