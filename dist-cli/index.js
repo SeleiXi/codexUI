@@ -23,9 +23,9 @@ import express from "express";
 
 // src/server/codexAppServerBridge.ts
 import { spawn as spawn2, spawnSync } from "child_process";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { mkdtemp as mkdtemp2, readFile as readFile2, mkdir as mkdir2, stat as stat2 } from "fs/promises";
-import { existsSync as existsSync2 } from "fs";
+import { existsSync as existsSync2, readFileSync } from "fs";
 import { request as httpsRequest } from "https";
 import { homedir as homedir2 } from "os";
 import { tmpdir as tmpdir2 } from "os";
@@ -1119,6 +1119,7 @@ async function handleSkillsRoutes(req, res, url, context) {
 }
 
 // src/server/codexAppServerBridge.ts
+var AUTH_STATE_POLL_MS = 3e3;
 function asRecord2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
@@ -1376,6 +1377,16 @@ function normalizeStringRecord(value) {
 }
 function getCodexAuthPath() {
   return join2(getCodexHomeDir2(), "auth.json");
+}
+function readCodexAuthFingerprint() {
+  try {
+    const raw = readFileSync(getCodexAuthPath(), "utf8");
+    const auth = JSON.parse(raw);
+    const identity = auth.tokens?.account_id?.trim() || auth.tokens?.refresh_token?.trim() || auth.user_id?.trim() || auth.userId?.trim() || auth.email_address?.trim() || auth.email?.trim() || auth.tokens?.access_token?.trim() || "__present__";
+    return createHash("sha1").update(identity).digest("hex");
+  } catch {
+    return "__missing__";
+  }
 }
 async function readCodexAuth() {
   try {
@@ -1690,6 +1701,8 @@ var AppServerProcess = class {
     this.readBuffer = "";
     this.nextId = 1;
     this.stopping = false;
+    this.authFingerprint = readCodexAuthFingerprint();
+    this.authMonitorTimer = null;
     this.pending = /* @__PURE__ */ new Map();
     this.notificationListeners = /* @__PURE__ */ new Set();
     this.pendingServerRequests = /* @__PURE__ */ new Map();
@@ -1701,9 +1714,33 @@ var AppServerProcess = class {
       'sandbox_mode="danger-full-access"'
     ];
   }
+  ensureAuthMonitor() {
+    if (this.authMonitorTimer !== null) return;
+    this.authMonitorTimer = setInterval(() => {
+      this.syncAuthState(true);
+    }, AUTH_STATE_POLL_MS);
+    this.authMonitorTimer.unref?.();
+  }
+  syncAuthState(emitNotification) {
+    const nextFingerprint = readCodexAuthFingerprint();
+    if (nextFingerprint === this.authFingerprint) return;
+    this.authFingerprint = nextFingerprint;
+    const hadActiveProcess = this.process !== null || this.initialized || this.initializePromise !== null;
+    if (!hadActiveProcess) return;
+    this.dispose();
+    if (emitNotification) {
+      this.emitNotification({
+        method: "auth/changed",
+        params: {}
+      });
+    }
+  }
   start() {
+    this.ensureAuthMonitor();
+    this.syncAuthState(false);
     if (this.process) return;
     this.stopping = false;
+    this.authFingerprint = readCodexAuthFingerprint();
     const codexCommand = resolveCodexCommand() ?? "codex";
     const invocation = getSpawnInvocation(codexCommand, this.appServerArgs);
     const proc = spawn2(invocation.cmd, invocation.args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -1893,6 +1930,10 @@ var AppServerProcess = class {
     return Array.from(this.pendingServerRequests.values());
   }
   dispose() {
+    if (this.authMonitorTimer !== null) {
+      clearInterval(this.authMonitorTimer);
+      this.authMonitorTimer = null;
+    }
     if (!this.process) return;
     const proc = this.process;
     this.stopping = true;
