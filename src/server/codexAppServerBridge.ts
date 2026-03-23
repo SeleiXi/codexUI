@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { mkdtemp, readFile, readdir, rm, mkdir, stat, cp, lstat, readlink, symlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -190,6 +190,72 @@ function getCodexHomeDir(): string {
   return codexHome && codexHome.length > 0 ? codexHome : join(homedir(), '.codex')
 }
 
+function quoteCmdExeArg(value: string): string {
+  const normalized = value.replace(/"/g, '""')
+  if (!/[\s"]/u.test(normalized)) {
+    return normalized
+  }
+  return `"${normalized}"`
+}
+
+function getSpawnInvocation(command: string, args: string[] = []): { cmd: string; args: string[] } {
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
+    return {
+      cmd: 'cmd.exe',
+      args: ['/d', '/s', '/c', [quoteCmdExeArg(command), ...args.map((arg) => quoteCmdExeArg(arg))].join(' ')],
+    }
+  }
+
+  return { cmd: command, args }
+}
+
+function canRun(command: string, args: string[] = []): boolean {
+  const invocation = getSpawnInvocation(command, args)
+  const result = spawnSync(invocation.cmd, invocation.args, { stdio: 'ignore' })
+  return result.status === 0
+}
+
+function getUserNpmPrefix(): string {
+  return join(homedir(), '.npm-global')
+}
+
+function resolveCodexCommand(): string | null {
+  if (canRun('codex', ['--version'])) {
+    return 'codex'
+  }
+
+  if (process.platform === 'win32') {
+    const windowsCandidates = [
+      process.env.APPDATA ? join(process.env.APPDATA, 'npm', 'codex.cmd') : '',
+      join(homedir(), '.local', 'bin', 'codex.cmd'),
+      join(getUserNpmPrefix(), 'bin', 'codex.cmd'),
+    ].filter(Boolean)
+
+    for (const candidate of windowsCandidates) {
+      if (existsSync(candidate) && canRun(candidate, ['--version'])) {
+        return candidate
+      }
+    }
+  }
+
+  const userCandidate = join(getUserNpmPrefix(), 'bin', 'codex')
+  if (existsSync(userCandidate) && canRun(userCandidate, ['--version'])) {
+    return userCandidate
+  }
+
+  const prefix = process.env.PREFIX?.trim()
+  if (!prefix) {
+    return null
+  }
+
+  const candidate = join(prefix, 'bin', 'codex')
+  if (existsSync(candidate) && canRun(candidate, ['--version'])) {
+    return candidate
+  }
+
+  return null
+}
+
 function getSkillsInstallDir(): string {
   return join(getCodexHomeDir(), 'skills')
 }
@@ -346,6 +412,10 @@ function getCodexGlobalStatePath(): string {
   return join(getCodexHomeDir(), '.codex-global-state.json')
 }
 
+function getCodexSessionIndexPath(): string {
+  return join(getCodexHomeDir(), 'session_index.jsonl')
+}
+
 type ThreadTitleCache = { titles: Record<string, string>; order: string[] }
 const MAX_THREAD_TITLES = 500
 
@@ -378,6 +448,63 @@ function removeFromThreadTitleCache(cache: ThreadTitleCache, id: string): Thread
   return { titles, order: cache.order.filter((o) => o !== id) }
 }
 
+type SessionIndexThreadTitle = {
+  id: string
+  title: string
+  updatedAtMs: number
+}
+
+function normalizeSessionIndexThreadTitle(value: unknown): SessionIndexThreadTitle | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const id = typeof record.id === 'string' ? record.id.trim() : ''
+  const title = typeof record.thread_name === 'string' ? record.thread_name.trim() : ''
+  const updatedAtIso = typeof record.updated_at === 'string' ? record.updated_at.trim() : ''
+  const updatedAtMs = updatedAtIso ? Date.parse(updatedAtIso) : Number.NaN
+
+  if (!id || !title) return null
+  return {
+    id,
+    title,
+    updatedAtMs: Number.isFinite(updatedAtMs) ? updatedAtMs : 0,
+  }
+}
+
+function trimThreadTitleCache(cache: ThreadTitleCache): ThreadTitleCache {
+  const titles = { ...cache.titles }
+  const order = cache.order.filter((id) => {
+    if (!titles[id]) return false
+    return true
+  }).slice(0, MAX_THREAD_TITLES)
+
+  for (const id of Object.keys(titles)) {
+    if (!order.includes(id)) {
+      delete titles[id]
+    }
+  }
+
+  return { titles, order }
+}
+
+function mergeThreadTitleCaches(base: ThreadTitleCache, overlay: ThreadTitleCache): ThreadTitleCache {
+  const titles = { ...base.titles, ...overlay.titles }
+  const order: string[] = []
+
+  for (const id of [...overlay.order, ...base.order]) {
+    if (!titles[id] || order.includes(id)) continue
+    order.push(id)
+  }
+
+  for (const id of Object.keys(titles)) {
+    if (!order.includes(id)) {
+      order.push(id)
+    }
+  }
+
+  return trimThreadTitleCache({ titles, order })
+}
+
 async function readThreadTitleCache(): Promise<ThreadTitleCache> {
   const statePath = getCodexGlobalStatePath()
   try {
@@ -399,6 +526,75 @@ async function writeThreadTitleCache(cache: ThreadTitleCache): Promise<void> {
     payload = {}
   }
   payload['thread-titles'] = cache
+  await writeFile(statePath, JSON.stringify(payload), 'utf8')
+}
+
+async function readThreadTitlesFromSessionIndex(): Promise<ThreadTitleCache> {
+  try {
+    const raw = await readFile(getCodexSessionIndexPath(), 'utf8')
+    const latestById = new Map<string, SessionIndexThreadTitle>()
+
+    for (const line of raw.split(/\r?\n/u)) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+
+      try {
+        const entry = normalizeSessionIndexThreadTitle(JSON.parse(trimmed) as unknown)
+        if (!entry) continue
+
+        const previous = latestById.get(entry.id)
+        if (!previous || entry.updatedAtMs >= previous.updatedAtMs) {
+          latestById.set(entry.id, entry)
+        }
+      } catch {
+        // Skip malformed lines and keep scanning the rest of the index.
+      }
+    }
+
+    const entries = Array.from(latestById.values()).sort((first, second) => second.updatedAtMs - first.updatedAtMs)
+    const titles: Record<string, string> = {}
+    const order: string[] = []
+    for (const entry of entries) {
+      titles[entry.id] = entry.title
+      order.push(entry.id)
+    }
+
+    return trimThreadTitleCache({ titles, order })
+  } catch {
+    return { titles: {}, order: [] }
+  }
+}
+
+async function readMergedThreadTitleCache(): Promise<ThreadTitleCache> {
+  const [sessionIndexCache, persistedCache] = await Promise.all([
+    readThreadTitlesFromSessionIndex(),
+    readThreadTitleCache(),
+  ])
+  return mergeThreadTitleCaches(sessionIndexCache, persistedCache)
+}
+
+async function readPinnedThreadIds(): Promise<string[]> {
+  const statePath = getCodexGlobalStatePath()
+  try {
+    const raw = await readFile(statePath, 'utf8')
+    const payload = asRecord(JSON.parse(raw)) ?? {}
+    return normalizeStringArray(payload['pinned-thread-ids'])
+  } catch {
+    return []
+  }
+}
+
+async function writePinnedThreadIds(threadIds: string[]): Promise<void> {
+  const statePath = getCodexGlobalStatePath()
+  let payload: Record<string, unknown> = {}
+  try {
+    const raw = await readFile(statePath, 'utf8')
+    payload = asRecord(JSON.parse(raw)) ?? {}
+  } catch {
+    payload = {}
+  }
+
+  payload['pinned-thread-ids'] = normalizeStringArray(threadIds)
   await writeFile(statePath, JSON.stringify(payload), 'utf8')
 }
 
@@ -573,7 +769,9 @@ class AppServerProcess {
     if (this.process) return
 
     this.stopping = false
-    const proc = spawn('codex', this.appServerArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const codexCommand = resolveCodexCommand() ?? 'codex'
+    const invocation = getSpawnInvocation(codexCommand, this.appServerArgs)
+    const proc = spawn(invocation.cmd, invocation.args, { stdio: ['pipe', 'pipe', 'pipe'] })
     this.process = proc
 
     proc.stdout.setEncoding('utf8')
@@ -853,7 +1051,9 @@ class MethodCatalog {
 
   private async runGenerateSchemaCommand(outDir: string): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      const process = spawn('codex', ['app-server', 'generate-json-schema', '--out', outDir], {
+      const codexCommand = resolveCodexCommand() ?? 'codex'
+      const invocation = getSpawnInvocation(codexCommand, ['app-server', 'generate-json-schema', '--out', outDir])
+      const process = spawn(invocation.cmd, invocation.args, {
         stdio: ['ignore', 'ignore', 'pipe'],
       })
 
@@ -1367,8 +1567,14 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/thread-titles') {
-        const cache = await readThreadTitleCache()
+        const cache = await readMergedThreadTitleCache()
         setJson(res, 200, { data: cache })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/codex-api/pinned-threads') {
+        const threadIds = await readPinnedThreadIds()
+        setJson(res, 200, { data: threadIds })
         return
       }
 
@@ -1403,6 +1609,13 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const cache = await readThreadTitleCache()
         const next = title ? updateThreadTitleCache(cache, id, title) : removeFromThreadTitleCache(cache, id)
         await writeThreadTitleCache(next)
+        setJson(res, 200, { ok: true })
+        return
+      }
+
+      if (req.method === 'PUT' && url.pathname === '/codex-api/pinned-threads') {
+        const payload = asRecord(await readJsonBody(req))
+        await writePinnedThreadIds(normalizeStringArray(payload?.threadIds))
         setJson(res, 200, { ok: true })
         return
       }

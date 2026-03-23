@@ -316,12 +316,24 @@ const props = defineProps<{
 
 export type FileAttachment = { label: string; path: string; fsPath: string }
 
+export type ComposerDraftPayload = {
+  text: string
+  imageUrls: string[]
+  fileAttachments: FileAttachment[]
+  skills: Array<{ name: string; path: string }>
+}
+
 export type SubmitPayload = {
   text: string
   imageUrls: string[]
   fileAttachments: FileAttachment[]
   skills: Array<{ name: string; path: string }>
   mode: 'steer' | 'queue'
+}
+
+export type ThreadComposerExposed = {
+  hydrateDraft: (payload: ComposerDraftPayload) => void
+  hasUnsavedDraft: () => boolean
 }
 
 const emit = defineEmits<{
@@ -424,6 +436,13 @@ const canSubmit = computed(() => {
   if (!props.activeThreadId) return false
   return draft.value.trim().length > 0 || selectedImages.value.length > 0 || fileAttachments.value.length > 0
 })
+const hasUnsavedDraft = computed(() =>
+  draft.value.trim().length > 0
+  || selectedImages.value.length > 0
+  || selectedSkills.value.length > 0
+  || fileAttachments.value.length > 0
+  || folderUploadGroups.value.length > 0,
+)
 const standaloneFileAttachments = computed(() => {
   const grouped = new Set<string>()
   for (const group of folderUploadGroups.value) {
@@ -465,14 +484,7 @@ function onSubmit(mode: 'steer' | 'queue' = 'steer'): void {
     skills: selectedSkills.value.map((s) => ({ name: s.name, path: s.path })),
     mode,
   })
-  draft.value = ''
-  selectedImages.value = []
-  selectedSkills.value = []
-  fileAttachments.value = []
-  folderUploadGroups.value = []
-  isAttachMenuOpen.value = false
-  isSlashMenuOpen.value = false
-  closeFileMention()
+  resetComposerState()
   if (isAndroid) {
     inputRef.value?.blur()
     return
@@ -892,6 +904,43 @@ function onDocumentClick(event: MouseEvent): void {
   isAttachMenuOpen.value = false
 }
 
+function resetComposerState(): void {
+  draft.value = ''
+  selectedImages.value = []
+  selectedSkills.value = []
+  fileAttachments.value = []
+  folderUploadGroups.value = []
+  dictationFeedback.value = ''
+  isAttachMenuOpen.value = false
+  isSlashMenuOpen.value = false
+  closeFileMention()
+}
+
+function hydrateDraft(payload: ComposerDraftPayload): void {
+  draft.value = payload.text
+  selectedImages.value = payload.imageUrls.map((url, index) => ({
+    id: `queued-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+    name: `Image ${index + 1}`,
+    url,
+  }))
+  selectedSkills.value = payload.skills.map((skill) => (
+    (props.skills ?? []).find((item) => item.path === skill.path)
+    ?? { name: skill.name, description: '', path: skill.path }
+  ))
+  fileAttachments.value = payload.fileAttachments.map((attachment) => ({ ...attachment }))
+  folderUploadGroups.value = []
+  dictationFeedback.value = ''
+  isAttachMenuOpen.value = false
+  isSlashMenuOpen.value = false
+  closeFileMention()
+  nextTick(() => inputRef.value?.focus())
+}
+
+defineExpose<ThreadComposerExposed>({
+  hydrateDraft,
+  hasUnsavedDraft: () => hasUnsavedDraft.value,
+})
+
 onMounted(() => {
   document.addEventListener('click', onDocumentClick)
 })
@@ -909,15 +958,7 @@ onBeforeUnmount(() => {
 watch(
   () => props.activeThreadId,
   () => {
-    draft.value = ''
-    selectedImages.value = []
-    selectedSkills.value = []
-    fileAttachments.value = []
-    folderUploadGroups.value = []
-    dictationFeedback.value = ''
-    isAttachMenuOpen.value = false
-    isSlashMenuOpen.value = false
-    closeFileMention()
+    resetComposerState()
   },
 )
 
@@ -1079,7 +1120,7 @@ watch(
 }
 
 .thread-composer-input {
-  @apply w-full min-w-0 min-h-10 sm:min-h-11 max-h-40 rounded-xl border-0 bg-transparent px-1 py-2 text-sm text-zinc-900 outline-none transition resize-none overflow-y-auto;
+  @apply w-full min-w-0 min-h-10 sm:min-h-11 max-h-40 rounded-xl border-0 bg-transparent px-1 py-2 text-base sm:text-sm text-zinc-900 outline-none transition resize-none overflow-y-auto;
 }
 
 .thread-composer-input:focus {

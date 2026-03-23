@@ -144,7 +144,12 @@
                 </span>
               </div>
 
-              <article v-if="message.text.length > 0" class="message-card" :data-role="message.role">
+              <article
+                v-if="message.text.length > 0"
+                class="message-card"
+                :class="{ 'message-tool-card': message.messageType === 'toolInvocation' }"
+                :data-role="message.role"
+              >
                 <div v-if="message.messageType === 'worked'" class="worked-separator-wrap" aria-live="polite">
                   <button type="button" class="worked-separator" @click="toggleWorkedExpand(message)">
                     <span class="worked-separator-line" aria-hidden="true" />
@@ -1541,6 +1546,14 @@ onBeforeUnmount(() => {
 .message-card[data-role='assistant'],
 .message-card[data-role='system'] {
   @apply px-0 py-0 bg-transparent border-none rounded-none;
+}
+
+.message-tool-card {
+  @apply rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 max-w-[min(76ch,100%)];
+}
+
+.message-tool-card .message-text {
+  @apply text-xs leading-relaxed font-mono text-zinc-700;
 }
 
 .conversation-item[data-message-type='worked'] .message-stack,

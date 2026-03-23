@@ -27,6 +27,14 @@ type CurrentModelConfig = {
   reasoningEffort: ReasoningEffort | ''
 }
 
+type ApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never'
+type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
+type ExecutionPrefs = {
+  approvalPolicy?: ApprovalPolicy
+  sandboxMode?: SandboxMode
+  cwd?: string
+}
+
 export type WorkspaceRootsState = {
   order: string[]
   labels: Record<string, string>
@@ -64,12 +72,21 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | '' {
 }
 
 async function getThreadGroupsV2(): Promise<UiProjectGroup[]> {
-  const payload = await callRpc<ThreadListResponse>('thread/list', {
-    archived: false,
-    limit: 100,
-    sortKey: 'updated_at',
-  })
-  return normalizeThreadGroupsV2(payload)
+  const allThreads: ThreadListResponse['data'] = []
+  let cursor: string | null = null
+
+  do {
+    const payload: ThreadListResponse = await callRpc<ThreadListResponse>('thread/list', {
+      archived: false,
+      limit: 100,
+      sortKey: 'updated_at',
+      cursor,
+    })
+    allThreads.push(...payload.data)
+    cursor = payload.nextCursor ?? null
+  } while (cursor)
+
+  return normalizeThreadGroupsV2({ data: allThreads, nextCursor: null })
 }
 
 async function getThreadMessagesV2(threadId: string): Promise<UiMessage[]> {
@@ -174,7 +191,7 @@ function normalizeThreadIdFromPayload(payload: unknown): string {
   return ''
 }
 
-export async function startThread(cwd?: string, model?: string): Promise<string> {
+export async function startThread(cwd?: string, model?: string, executionPrefs?: ExecutionPrefs): Promise<string> {
   try {
     const params: Record<string, unknown> = {}
     if (typeof cwd === 'string' && cwd.trim().length > 0) {
@@ -182,6 +199,12 @@ export async function startThread(cwd?: string, model?: string): Promise<string>
     }
     if (typeof model === 'string' && model.trim().length > 0) {
       params.model = model.trim()
+    }
+    if (executionPrefs?.approvalPolicy) {
+      params.approvalPolicy = executionPrefs.approvalPolicy
+    }
+    if (executionPrefs?.sandboxMode) {
+      params.sandbox = executionPrefs.sandboxMode
     }
     const payload = await callRpc<{ thread?: { id?: string } }>('thread/start', params)
     const threadId = normalizeThreadIdFromPayload(payload)
@@ -195,6 +218,40 @@ export async function startThread(cwd?: string, model?: string): Promise<string>
 }
 
 export type FileAttachmentParam = { label: string; path: string; fsPath: string }
+
+function normalizeExecutionCwd(cwd?: string): string {
+  return typeof cwd === 'string' ? cwd.trim() : ''
+}
+
+function buildSandboxPolicy(preferences?: ExecutionPrefs): Record<string, unknown> | null {
+  const sandboxMode = preferences?.sandboxMode
+  if (!sandboxMode) return null
+
+  if (sandboxMode === 'danger-full-access') {
+    return { type: 'dangerFullAccess' }
+  }
+
+  if (sandboxMode === 'read-only') {
+    return {
+      type: 'readOnly',
+      access: { type: 'fullAccess' },
+    }
+  }
+
+  const cwd = normalizeExecutionCwd(preferences?.cwd)
+  if (!cwd) {
+    return { type: 'dangerFullAccess' }
+  }
+
+  return {
+    type: 'workspaceWrite',
+    writableRoots: [cwd],
+    readOnlyAccess: { type: 'fullAccess' },
+    networkAccess: true,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false,
+  }
+}
 
 function buildTextWithAttachments(
   prompt: string,
@@ -216,6 +273,7 @@ export async function startThreadTurn(
   effort?: ReasoningEffort,
   skills?: Array<{ name: string; path: string }>,
   fileAttachments: FileAttachmentParam[] = [],
+  executionPrefs?: ExecutionPrefs,
 ): Promise<void> {
   try {
     const finalText = buildTextWithAttachments(text, fileAttachments)
@@ -245,6 +303,13 @@ export async function startThreadTurn(
     }
     if (typeof effort === 'string' && effort.length > 0) {
       params.effort = effort
+    }
+    if (executionPrefs?.approvalPolicy) {
+      params.approvalPolicy = executionPrefs.approvalPolicy
+    }
+    const sandboxPolicy = buildSandboxPolicy(executionPrefs)
+    if (sandboxPolicy) {
+      params.sandboxPolicy = sandboxPolicy
     }
     await callRpc('turn/start', params)
   } catch (error) {
@@ -502,6 +567,31 @@ export async function persistThreadTitle(id: string, title: string): Promise<voi
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, title }),
+    })
+  } catch {
+    // Best-effort persist
+  }
+}
+
+export async function getPinnedThreadIds(): Promise<string[]> {
+  try {
+    const response = await fetch('/codex-api/pinned-threads')
+    if (!response.ok) return []
+    const envelope = (await response.json()) as { data?: unknown }
+    return Array.isArray(envelope.data)
+      ? envelope.data.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : []
+  } catch {
+    return []
+  }
+}
+
+export async function persistPinnedThreadIds(threadIds: string[]): Promise<void> {
+  try {
+    await fetch('/codex-api/pinned-threads', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadIds }),
     })
   } catch {
     // Best-effort persist
