@@ -50,6 +50,7 @@ const PROJECT_DISPLAY_NAME_STORAGE_KEY = 'codex-web-local.project-display-name.v
 const QUEUED_MESSAGES_STORAGE_KEY = 'codex-web-local.queued-messages.v1'
 const PROJECT_EXECUTION_PREFS_STORAGE_KEY = 'codex-web-local.project-execution-prefs.v1'
 const EVENT_SYNC_DEBOUNCE_MS = 220
+const RATE_LIMIT_REFRESH_DEBOUNCE_MS = 500
 const REASONING_EFFORT_OPTIONS: ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']
 const GLOBAL_SERVER_REQUEST_SCOPE = '__global__'
 const MODEL_FALLBACK_ID = 'gpt-5.2-codex'
@@ -796,6 +797,8 @@ export function useDesktopState() {
   const hasLoadedThreads = ref(false)
   let stopNotificationStream: (() => void) | null = null
   let eventSyncTimer: number | null = null
+  let rateLimitRefreshTimer: number | null = null
+  let rateLimitRefreshPromise: Promise<void> | null = null
   let pendingThreadsRefresh = false
   const pendingThreadMessageRefresh = new Set<string>()
   let hasHydratedWorkspaceRootsState = false
@@ -1050,11 +1053,38 @@ export function useDesktopState() {
   }
 
   async function refreshRateLimits(): Promise<void> {
-    try {
-      accountRateLimitSnapshots.value = normalizeRateLimitSnapshotsPayload(await getAccountRateLimits())
-    } catch {
-      // Keep the last known rate-limit state if the endpoint is temporarily unavailable.
+    if (rateLimitRefreshPromise) {
+      await rateLimitRefreshPromise
+      return
     }
+
+    rateLimitRefreshPromise = (async () => {
+      try {
+        accountRateLimitSnapshots.value = normalizeRateLimitSnapshotsPayload(await getAccountRateLimits())
+      } catch {
+        // Keep the last known rate-limit state if the endpoint is temporarily unavailable.
+      } finally {
+        rateLimitRefreshPromise = null
+      }
+    })()
+
+    await rateLimitRefreshPromise
+  }
+
+  function scheduleRateLimitRefresh(): void {
+    if (typeof window === 'undefined') {
+      void refreshRateLimits()
+      return
+    }
+
+    if (rateLimitRefreshTimer !== null) {
+      window.clearTimeout(rateLimitRefreshTimer)
+    }
+
+    rateLimitRefreshTimer = window.setTimeout(() => {
+      rateLimitRefreshTimer = null
+      void refreshRateLimits()
+    }, RATE_LIMIT_REFRESH_DEBOUNCE_MS)
   }
 
   function applyCachedTitlesToGroups(groups: UiProjectGroup[]): UiProjectGroup[] {
@@ -1433,27 +1463,6 @@ export function useDesktopState() {
     }
 
     return next
-  }
-
-  function mergeRateLimitSnapshots(
-    previous: UiRateLimitSnapshot[],
-    incoming: UiRateLimitSnapshot[],
-  ): UiRateLimitSnapshot[] {
-    if (incoming.length === 0) return previous
-
-    const incomingByKey = new Map(incoming.map((snapshot) => [getRateLimitSnapshotKey(snapshot), snapshot]))
-    const merged = previous.map((snapshot) => incomingByKey.get(getRateLimitSnapshotKey(snapshot)) ?? snapshot)
-    const mergedKeys = new Set(merged.map((snapshot) => getRateLimitSnapshotKey(snapshot)))
-
-    for (const snapshot of incoming) {
-      const key = getRateLimitSnapshotKey(snapshot)
-      if (!mergedKeys.has(key)) {
-        merged.push(snapshot)
-        mergedKeys.add(key)
-      }
-    }
-
-    return merged
   }
 
   function extractThreadIdFromNotification(notification: RpcNotification): string {
@@ -2093,10 +2102,7 @@ export function useDesktopState() {
     }
 
     if (notification.method === 'account/rateLimits/updated') {
-      const snapshots = normalizeRateLimitSnapshotsPayload(notification.params)
-      if (snapshots.length > 0) {
-        accountRateLimitSnapshots.value = mergeRateLimitSnapshots(accountRateLimitSnapshots.value, snapshots)
-      }
+      scheduleRateLimitRefresh()
     }
 
     if (notification.method === 'thread/name/updated') {
@@ -3125,6 +3131,10 @@ export function useDesktopState() {
     if (eventSyncTimer !== null && typeof window !== 'undefined') {
       window.clearTimeout(eventSyncTimer)
       eventSyncTimer = null
+    }
+    if (rateLimitRefreshTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(rateLimitRefreshTimer)
+      rateLimitRefreshTimer = null
     }
     activeReasoningItemId = ''
     shouldAutoScrollOnNextAgentEvent = false
