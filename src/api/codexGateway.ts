@@ -9,6 +9,7 @@ import {
 } from './codexRpcClient'
 import type {
   ConfigReadResponse,
+  GetAccountRateLimitsResponse,
   ModelListResponse,
   ReasoningEffort,
   ThreadListResponse,
@@ -296,6 +297,10 @@ export async function getCurrentModelConfig(): Promise<CurrentModelConfig> {
   const model = payload.config.model ?? ''
   const reasoningEffort = normalizeReasoningEffort(payload.config.model_reasoning_effort)
   return { model, reasoningEffort }
+}
+
+export async function getAccountRateLimits(): Promise<GetAccountRateLimitsResponse> {
+  return await callRpc<GetAccountRateLimitsResponse>('account/rateLimits/read')
 }
 
 function normalizeWorkspaceRootsState(payload: unknown): WorkspaceRootsState {
