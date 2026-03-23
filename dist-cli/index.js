@@ -2522,11 +2522,11 @@ function isLocalhostRemote(remote) {
 }
 function isLocalhostHost(host) {
   const normalized = host.toLowerCase();
-  return normalized.startsWith("localhost:") || normalized === "localhost" || normalized.startsWith("127.0.0.1:");
+  return normalized.startsWith("localhost:") || normalized === "localhost" || normalized.startsWith("127.0.0.1:") || normalized === "127.0.0.1" || normalized.startsWith("[::1]:") || normalized === "[::1]";
 }
 function isAuthorizedByRequestLike(remoteAddress, hostHeader, cookieHeader, validTokens) {
   const remote = remoteAddress ?? "";
-  if (isLocalhostRemote(remote) || isLocalhostHost(hostHeader ?? "")) {
+  if (isLocalhostRemote(remote) && isLocalhostHost(hostHeader ?? "")) {
     return true;
   }
   const cookies = parseCookies(cookieHeader);
