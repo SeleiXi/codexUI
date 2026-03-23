@@ -86,34 +86,35 @@
                 <span class="sidebar-settings-label">Click to toggle dictation</span>
                 <span class="sidebar-settings-toggle" :class="{ 'is-on': dictationClickToToggle }" />
               </button>
-              <div class="sidebar-settings-divider" />
-              <div class="sidebar-settings-caption">
-                {{ activeProjectSettingsLabel }}
-              </div>
-              <button
-                class="sidebar-settings-row"
-                type="button"
-                :disabled="!activeProjectSettingsCwd"
-                @click="cycleProjectSandboxMode"
-              >
-                <span class="sidebar-settings-label">Sandbox</span>
-                <span class="sidebar-settings-value">{{ currentProjectSandboxLabel }}</span>
-              </button>
-              <button
-                class="sidebar-settings-row"
-                type="button"
-                :disabled="!activeProjectSettingsCwd"
-                @click="cycleProjectApprovalPolicy"
-              >
-                <span class="sidebar-settings-label">Approval</span>
-                <span class="sidebar-settings-value">{{ currentProjectApprovalLabel }}</span>
-              </button>
             </div>
           </Transition>
           <button class="sidebar-settings-button" type="button" @click="isSettingsOpen = !isSettingsOpen">
             <IconTablerSettings class="sidebar-settings-icon" />
             <span>Settings</span>
           </button>
+          <div class="sidebar-runtime-panel">
+            <div class="sidebar-settings-caption">
+              {{ activeProjectSettingsLabel }}
+            </div>
+            <button
+              class="sidebar-settings-row"
+              type="button"
+              :disabled="!activeProjectSettingsCwd"
+              @click="cycleProjectSandboxMode"
+            >
+              <span class="sidebar-settings-label">Sandbox</span>
+              <span class="sidebar-settings-value">{{ currentProjectSandboxLabel }}</span>
+            </button>
+            <button
+              class="sidebar-settings-row"
+              type="button"
+              :disabled="!activeProjectSettingsCwd"
+              @click="cycleProjectApprovalPolicy"
+            >
+              <span class="sidebar-settings-label">Approval</span>
+              <span class="sidebar-settings-value">{{ currentProjectApprovalLabel }}</span>
+            </button>
+          </div>
         </div>
       </section>
     </template>
@@ -1246,6 +1247,10 @@ async function submitFirstMessageForNewThread(
 
 .sidebar-settings-panel {
   @apply mb-1 rounded-lg border border-zinc-200 bg-white overflow-hidden;
+}
+
+.sidebar-runtime-panel {
+  @apply mt-1 rounded-lg border border-zinc-200 bg-white overflow-hidden;
 }
 
 .sidebar-settings-row {
