@@ -361,9 +361,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import type { UiProjectGroup, UiThread } from '../../types/codex'
+import { getPinnedThreadIds, persistPinnedThreadIds } from '../../api/codexGateway'
 import IconTablerChevronDown from '../icons/IconTablerChevronDown.vue'
 import IconTablerChevronRight from '../icons/IconTablerChevronRight.vue'
 import IconTablerDots from '../icons/IconTablerDots.vue'
@@ -467,6 +468,7 @@ const projectGroupResizeObserver =
       })
     : null
 const COLLAPSED_STORAGE_KEY = 'codex-web-local.collapsed-projects.v1'
+let hasHydratedPinnedThreads = false
 
 function loadCollapsedState(): Record<string, boolean> {
   if (typeof window === 'undefined') return {}
@@ -651,6 +653,14 @@ function togglePin(threadId: string): void {
   }
 
   pinnedThreadIds.value = [threadId, ...pinnedThreadIds.value]
+}
+
+async function hydratePinnedThreads(): Promise<void> {
+  try {
+    pinnedThreadIds.value = await getPinnedThreadIds()
+  } finally {
+    hasHydratedPinnedThreads = true
+  }
 }
 
 function onSelect(threadId: string): void {
@@ -1274,6 +1284,14 @@ watch(
   },
 )
 
+watch(
+  pinnedThreadIds,
+  (threadIds) => {
+    if (!hasHydratedPinnedThreads) return
+    void persistPinnedThreadIds(threadIds)
+  },
+)
+
 const hasOpenDismissableMenu = computed(() => isOrganizeMenuOpen.value || openProjectMenuId.value !== '')
 
 watch(hasOpenDismissableMenu, (isOpen) => {
@@ -1293,6 +1311,10 @@ onBeforeUnmount(() => {
   projectMenuWrapElementByName.clear()
   unbindProjectMenuDismissListeners()
   resetProjectDragState()
+})
+
+onMounted(() => {
+  void hydratePinnedThreads()
 })
 </script>
 

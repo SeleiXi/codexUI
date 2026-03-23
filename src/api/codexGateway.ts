@@ -64,12 +64,21 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | '' {
 }
 
 async function getThreadGroupsV2(): Promise<UiProjectGroup[]> {
-  const payload = await callRpc<ThreadListResponse>('thread/list', {
-    archived: false,
-    limit: 100,
-    sortKey: 'updated_at',
-  })
-  return normalizeThreadGroupsV2(payload)
+  const allThreads: ThreadListResponse['data'] = []
+  let cursor: string | null = null
+
+  do {
+    const payload: ThreadListResponse = await callRpc<ThreadListResponse>('thread/list', {
+      archived: false,
+      limit: 100,
+      sortKey: 'updated_at',
+      cursor,
+    })
+    allThreads.push(...payload.data)
+    cursor = payload.nextCursor ?? null
+  } while (cursor)
+
+  return normalizeThreadGroupsV2({ data: allThreads, nextCursor: null })
 }
 
 async function getThreadMessagesV2(threadId: string): Promise<UiMessage[]> {
@@ -502,6 +511,31 @@ export async function persistThreadTitle(id: string, title: string): Promise<voi
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, title }),
+    })
+  } catch {
+    // Best-effort persist
+  }
+}
+
+export async function getPinnedThreadIds(): Promise<string[]> {
+  try {
+    const response = await fetch('/codex-api/pinned-threads')
+    if (!response.ok) return []
+    const envelope = (await response.json()) as { data?: unknown }
+    return Array.isArray(envelope.data)
+      ? envelope.data.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : []
+  } catch {
+    return []
+  }
+}
+
+export async function persistPinnedThreadIds(threadIds: string[]): Promise<void> {
+  try {
+    await fetch('/codex-api/pinned-threads', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadIds }),
     })
   } catch {
     // Best-effort persist
