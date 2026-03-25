@@ -47,11 +47,23 @@ const SCROLL_STATE_STORAGE_KEY = 'codex-web-local.thread-scroll-state.v1'
 const SELECTED_THREAD_STORAGE_KEY = 'codex-web-local.selected-thread-id.v1'
 const PROJECT_ORDER_STORAGE_KEY = 'codex-web-local.project-order.v1'
 const PROJECT_DISPLAY_NAME_STORAGE_KEY = 'codex-web-local.project-display-name.v1'
-const EVENT_SYNC_DEBOUNCE_MS = 220
+const PROJECT_EXECUTION_PREFS_STORAGE_KEY = 'codex-web-local.project-execution-prefs.v1'
+const EVENT_SYNC_DEBOUNCE_MS = 900
+const IN_PROGRESS_FALLBACK_SYNC_MS = 15000
 const RATE_LIMIT_REFRESH_DEBOUNCE_MS = 500
 const REASONING_EFFORT_OPTIONS: ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']
 const GLOBAL_SERVER_REQUEST_SCOPE = '__global__'
 const MODEL_FALLBACK_ID = 'gpt-5.2-codex'
+type ApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never'
+type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
+type ProjectExecutionPrefs = {
+  approvalPolicy: ApprovalPolicy
+  sandboxMode: SandboxMode
+}
+const DEFAULT_PROJECT_EXECUTION_PREFS: ProjectExecutionPrefs = {
+  approvalPolicy: 'never',
+  sandboxMode: 'danger-full-access',
+}
 
 function loadReadStateMap(): Record<string, string> {
   if (typeof window === 'undefined') return {}
@@ -191,6 +203,51 @@ function loadProjectDisplayNames(): Record<string, string> {
 function saveProjectDisplayNames(displayNames: Record<string, string>): void {
   if (typeof window === 'undefined') return
   window.localStorage.setItem(PROJECT_DISPLAY_NAME_STORAGE_KEY, JSON.stringify(displayNames))
+}
+
+function normalizeProjectCwdKey(cwd: string): string {
+  return cwd.trim().replace(/\\/gu, '/')
+}
+
+function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
+  return value === 'untrusted' || value === 'on-failure' || value === 'on-request' || value === 'never'
+}
+
+function isSandboxMode(value: unknown): value is SandboxMode {
+  return value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access'
+}
+
+function loadProjectExecutionPrefsMap(): Record<string, ProjectExecutionPrefs> {
+  if (typeof window === 'undefined') return {}
+
+  try {
+    const raw = window.localStorage.getItem(PROJECT_EXECUTION_PREFS_STORAGE_KEY)
+    if (!raw) return {}
+
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+
+    const normalized: Record<string, ProjectExecutionPrefs> = {}
+    for (const [cwd, value] of Object.entries(parsed as Record<string, unknown>)) {
+      const key = normalizeProjectCwdKey(cwd)
+      if (!key || !value || typeof value !== 'object' || Array.isArray(value)) continue
+
+      const row = value as Record<string, unknown>
+      normalized[key] = {
+        approvalPolicy: isApprovalPolicy(row.approvalPolicy) ? row.approvalPolicy : DEFAULT_PROJECT_EXECUTION_PREFS.approvalPolicy,
+        sandboxMode: isSandboxMode(row.sandboxMode) ? row.sandboxMode : DEFAULT_PROJECT_EXECUTION_PREFS.sandboxMode,
+      }
+    }
+
+    return normalized
+  } catch {
+    return {}
+  }
+}
+
+function saveProjectExecutionPrefsMap(state: Record<string, ProjectExecutionPrefs>): void {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(PROJECT_EXECUTION_PREFS_STORAGE_KEY, JSON.stringify(state))
 }
 
 function mergeProjectOrder(previousOrder: string[], incomingGroups: UiProjectGroup[]): string[] {
@@ -637,6 +694,7 @@ export function useDesktopState() {
     fallbackRetried: boolean
   }
   const queuedMessagesByThreadId = ref<Record<string, QueuedMessage[]>>({})
+  const projectExecutionPrefsByCwd = ref<Record<string, ProjectExecutionPrefs>>(loadProjectExecutionPrefsMap())
   const eventUnreadByThreadId = ref<Record<string, boolean>>({})
   const availableModelIds = ref<string[]>([])
   const selectedModelId = ref('')
@@ -672,6 +730,10 @@ export function useDesktopState() {
   let eventSyncTimer: number | null = null
   let rateLimitRefreshTimer: number | null = null
   let rateLimitRefreshPromise: Promise<void> | null = null
+  let loadThreadsPromise: Promise<void> | null = null
+  const loadMessagesPromiseByThreadId = new Map<string, Promise<void>>()
+  let inProgressSyncInterval: number | null = null
+  let realtimeResyncPromise: Promise<void> | null = null
   let pendingThreadsRefresh = false
   const pendingThreadMessageRefresh = new Set<string>()
   let hasHydratedWorkspaceRootsState = false
@@ -765,6 +827,38 @@ export function useDesktopState() {
     pendingTurnRequestByThreadId.value = omitKey(pendingTurnRequestByThreadId.value, threadId)
   }
 
+  function getThreadCwd(threadId: string): string {
+    return allThreads.value.find((thread) => thread.id === threadId)?.cwd?.trim() ?? ''
+  }
+
+  function getProjectExecutionPrefs(cwd: string): ProjectExecutionPrefs {
+    const key = normalizeProjectCwdKey(cwd)
+    if (!key) return DEFAULT_PROJECT_EXECUTION_PREFS
+    return projectExecutionPrefsByCwd.value[key] ?? DEFAULT_PROJECT_EXECUTION_PREFS
+  }
+
+  function updateProjectExecutionPrefs(cwd: string, next: Partial<ProjectExecutionPrefs>): void {
+    const key = normalizeProjectCwdKey(cwd)
+    if (!key) return
+
+    const current = getProjectExecutionPrefs(key)
+    const merged: ProjectExecutionPrefs = {
+      approvalPolicy: next.approvalPolicy ?? current.approvalPolicy,
+      sandboxMode: next.sandboxMode ?? current.sandboxMode,
+    }
+
+    const shouldUseDefault =
+      merged.approvalPolicy === DEFAULT_PROJECT_EXECUTION_PREFS.approvalPolicy &&
+      merged.sandboxMode === DEFAULT_PROJECT_EXECUTION_PREFS.sandboxMode
+
+    const nextMap = shouldUseDefault
+      ? omitKey(projectExecutionPrefsByCwd.value, key)
+      : { ...projectExecutionPrefsByCwd.value, [key]: merged }
+
+    projectExecutionPrefsByCwd.value = nextMap
+    saveProjectExecutionPrefsMap(nextMap)
+  }
+
   async function retryPendingTurnWithFallback(threadId: string): Promise<void> {
     if (fallbackRetryInFlightThreadIds.has(threadId)) return
     const pending = pendingTurnRequestByThreadId.value[threadId]
@@ -803,6 +897,7 @@ export function useDesktopState() {
         await resumeThread(threadId)
       }
 
+      const executionPrefs = getProjectExecutionPrefs(getThreadCwd(threadId))
       await startThreadTurn(
         threadId,
         pending.text,
@@ -811,6 +906,11 @@ export function useDesktopState() {
         pending.effort || undefined,
         pending.skills.length > 0 ? pending.skills : undefined,
         pending.fileAttachments,
+        {
+          approvalPolicy: executionPrefs.approvalPolicy,
+          sandboxMode: executionPrefs.sandboxMode,
+          cwd: getThreadCwd(threadId),
+        },
       )
 
       resumedThreadById.value = {
@@ -2058,22 +2158,22 @@ export function useDesktopState() {
 
   }
 
+  function shouldRefreshThreadListForNotification(method: string): boolean {
+    return (
+      method === 'auth/changed' ||
+      method.startsWith('thread/') ||
+      method === 'turn/started' ||
+      method === 'turn/completed'
+    )
+  }
+
   function queueEventDrivenSync(notification: RpcNotification): void {
     const threadId = extractThreadIdFromNotification(notification)
     if (threadId) {
       pendingThreadMessageRefresh.add(threadId)
     }
 
-    const method = notification.method
-    if (method === 'auth/changed') {
-      pendingThreadsRefresh = true
-    }
-    if (
-      method.startsWith('thread/') ||
-      method.startsWith('turn/') ||
-      method.startsWith('item/') ||
-      method === 'auth/changed'
-    ) {
+    if (shouldRefreshThreadListForNotification(notification.method)) {
       pendingThreadsRefresh = true
     }
 
@@ -2152,46 +2252,83 @@ export function useDesktopState() {
     }
   }
 
+  function markThreadAsResumed(threadId: string): void {
+    resumedThreadById.value = {
+      ...resumedThreadById.value,
+      [threadId]: true,
+    }
+  }
+
+  function shouldResumeThreadBeforeRead(threadId: string): boolean {
+    if (!threadId || resumedThreadById.value[threadId] === true) {
+      return false
+    }
+
+    return (
+      inProgressById.value[threadId] === true ||
+      (activeTurnIdByThreadId.value[threadId] ?? '').length > 0 ||
+      Boolean(liveAgentMessagesByThreadId.value[threadId]?.length) ||
+      Boolean(liveCommandsByThreadId.value[threadId]?.length)
+    )
+  }
+
+  function refreshNonCriticalState(): void {
+    void refreshModelPreferences()
+    void refreshRateLimits()
+    void refreshSkills()
+  }
+
   async function loadThreads() {
-    if (!hasLoadedThreads.value) {
-      isLoadingThreads.value = true
+    if (loadThreadsPromise) {
+      await loadThreadsPromise
+      return
     }
 
-    try {
-      const [groups] = await Promise.all([getThreadGroups(), loadThreadTitleCacheIfNeeded()])
-      await hydrateWorkspaceRootsStateIfNeeded(groups)
-
-      const nextProjectOrder = mergeProjectOrder(projectOrder.value, groups)
-      if (!areStringArraysEqual(projectOrder.value, nextProjectOrder)) {
-        projectOrder.value = nextProjectOrder
-        saveProjectOrder(projectOrder.value)
+    loadThreadsPromise = (async () => {
+      if (!hasLoadedThreads.value) {
+        isLoadingThreads.value = true
       }
 
-      const orderedGroups = orderGroupsByProjectOrder(groups, projectOrder.value)
-      const mergedWithInProgress = mergeIncomingWithLocalInProgressThreads(
-        sourceGroups.value,
-        orderedGroups,
-        inProgressById.value,
-      )
-      sourceGroups.value = mergeThreadGroups(sourceGroups.value, mergedWithInProgress)
-      inProgressById.value = pruneThreadStateMap(
-        inProgressById.value,
-        new Set(flattenThreads(sourceGroups.value).map((thread) => thread.id)),
-      )
-      applyThreadFlags()
-      hasLoadedThreads.value = true
+      try {
+        const [groups] = await Promise.all([getThreadGroups(), loadThreadTitleCacheIfNeeded()])
+        await hydrateWorkspaceRootsStateIfNeeded(groups)
 
-      const flatThreads = flattenThreads(projectGroups.value)
-      pruneThreadScopedState(flatThreads)
+        const nextProjectOrder = mergeProjectOrder(projectOrder.value, groups)
+        if (!areStringArraysEqual(projectOrder.value, nextProjectOrder)) {
+          projectOrder.value = nextProjectOrder
+          saveProjectOrder(projectOrder.value)
+        }
 
-      const currentExists = flatThreads.some((thread) => thread.id === selectedThreadId.value)
+        const orderedGroups = orderGroupsByProjectOrder(groups, projectOrder.value)
+        const mergedWithInProgress = mergeIncomingWithLocalInProgressThreads(
+          sourceGroups.value,
+          orderedGroups,
+          inProgressById.value,
+        )
+        sourceGroups.value = mergeThreadGroups(sourceGroups.value, mergedWithInProgress)
+        inProgressById.value = pruneThreadStateMap(
+          inProgressById.value,
+          new Set(flattenThreads(sourceGroups.value).map((thread) => thread.id)),
+        )
+        applyThreadFlags()
+        hasLoadedThreads.value = true
 
-      if (!currentExists) {
-        setSelectedThreadId(flatThreads[0]?.id ?? '')
+        const flatThreads = flattenThreads(projectGroups.value)
+        pruneThreadScopedState(flatThreads)
+
+        if (selectedThreadId.value) {
+          const currentExists = flatThreads.some((thread) => thread.id === selectedThreadId.value)
+          if (!currentExists) {
+            setSelectedThreadId(flatThreads[0]?.id ?? '')
+          }
+        }
+      } finally {
+        isLoadingThreads.value = false
+        loadThreadsPromise = null
       }
-    } finally {
-      isLoadingThreads.value = false
-    }
+    })()
+
+    await loadThreadsPromise
   }
 
   async function loadMessages(threadId: string, options: { silent?: boolean } = {}) {
@@ -2199,51 +2336,65 @@ export function useDesktopState() {
       return
     }
 
-    const alreadyLoaded = loadedMessagesByThreadId.value[threadId] === true
-    const shouldShowLoading = options.silent !== true && !alreadyLoaded
-    if (shouldShowLoading) {
-      isLoadingMessages.value = true
+    const existingLoad = loadMessagesPromiseByThreadId.get(threadId)
+    if (existingLoad) {
+      await existingLoad
+      return
     }
 
-    try {
-      if (resumedThreadById.value[threadId] !== true) {
-        await resumeThread(threadId)
-        resumedThreadById.value = {
-          ...resumedThreadById.value,
+    const alreadyLoaded = loadedMessagesByThreadId.value[threadId] === true
+    const shouldShowLoading = options.silent !== true && !alreadyLoaded
+    const loadPromise = (async () => {
+      if (shouldShowLoading) {
+        isLoadingMessages.value = true
+      }
+
+      try {
+        if (shouldResumeThreadBeforeRead(threadId)) {
+          await resumeThread(threadId)
+          markThreadAsResumed(threadId)
+        }
+
+        const { messages: nextMessages, inProgress } = await getThreadDetail(threadId)
+        const previousPersisted = persistedMessagesByThreadId.value[threadId] ?? []
+        const mergedMessages = mergeMessages(previousPersisted, nextMessages, {
+          preserveMissing: options.silent === true,
+        })
+        setPersistedMessagesForThread(threadId, mergedMessages)
+        reconcileOptimisticUserMessages(threadId, mergedMessages)
+
+        const previousLiveAgent = liveAgentMessagesByThreadId.value[threadId] ?? []
+        const nextLiveAgent = removeRedundantLiveAgentMessages(previousLiveAgent, nextMessages)
+        setLiveAgentMessagesForThread(threadId, nextLiveAgent)
+        removeLiveCommandsPersistedIn(threadId, nextMessages)
+
+        loadedMessagesByThreadId.value = {
+          ...loadedMessagesByThreadId.value,
           [threadId]: true,
         }
-      }
 
-      const { messages: nextMessages, inProgress } = await getThreadDetail(threadId)
-      const previousPersisted = persistedMessagesByThreadId.value[threadId] ?? []
-      const mergedMessages = mergeMessages(previousPersisted, nextMessages, {
-        preserveMissing: options.silent === true,
-      })
-      setPersistedMessagesForThread(threadId, mergedMessages)
-      reconcileOptimisticUserMessages(threadId, mergedMessages)
-
-      const previousLiveAgent = liveAgentMessagesByThreadId.value[threadId] ?? []
-      const nextLiveAgent = removeRedundantLiveAgentMessages(previousLiveAgent, nextMessages)
-      setLiveAgentMessagesForThread(threadId, nextLiveAgent)
-      removeLiveCommandsPersistedIn(threadId, nextMessages)
-
-      loadedMessagesByThreadId.value = {
-        ...loadedMessagesByThreadId.value,
-        [threadId]: true,
-      }
-
-      const version = currentThreadVersion(threadId)
-      if (version) {
-        loadedVersionByThreadId.value = {
-          ...loadedVersionByThreadId.value,
-          [threadId]: version,
+        const version = currentThreadVersion(threadId)
+        if (version) {
+          loadedVersionByThreadId.value = {
+            ...loadedVersionByThreadId.value,
+            [threadId]: version,
+          }
+        }
+        setThreadInProgress(threadId, inProgress)
+        markThreadAsRead(threadId)
+      } finally {
+        if (shouldShowLoading) {
+          isLoadingMessages.value = false
         }
       }
-      setThreadInProgress(threadId, inProgress)
-      markThreadAsRead(threadId)
+    })()
+
+    loadMessagesPromiseByThreadId.set(threadId, loadPromise)
+    try {
+      await loadPromise
     } finally {
-      if (shouldShowLoading) {
-        isLoadingMessages.value = false
+      if (loadMessagesPromiseByThreadId.get(threadId) === loadPromise) {
+        loadMessagesPromiseByThreadId.delete(threadId)
       }
     }
   }
@@ -2257,17 +2408,19 @@ export function useDesktopState() {
     }
   }
 
-  async function refreshAll() {
+  async function refreshAll(options: { includeSelectedThreadMessages?: boolean; includeNonCriticalState?: boolean } = {}) {
     error.value = ''
 
     try {
       await loadThreads()
-      await Promise.all([
-        refreshModelPreferences(),
-        refreshRateLimits(),
-        refreshSkills(),
-      ])
-      await loadMessages(selectedThreadId.value)
+
+      if (options.includeNonCriticalState !== false) {
+        refreshNonCriticalState()
+      }
+
+      if (options.includeSelectedThreadMessages === true) {
+        await loadMessages(selectedThreadId.value)
+      }
     } catch (unknownError) {
       error.value = unknownError instanceof Error ? unknownError.message : 'Unknown application error'
     }
@@ -2380,6 +2533,7 @@ export function useDesktopState() {
     const nextText = text.trim()
     const targetCwd = cwd.trim()
     const selectedModel = selectedModelId.value.trim()
+    const executionPrefs = getProjectExecutionPrefs(targetCwd)
     if (!nextText && imageUrls.length === 0 && fileAttachments.length === 0) return ''
 
     isSendingMessage.value = true
@@ -2389,11 +2543,11 @@ export function useDesktopState() {
 
     try {
       try {
-        threadId = await startThread(targetCwd || undefined, selectedModel || undefined)
+        threadId = await startThread(targetCwd || undefined, selectedModel || undefined, executionPrefs)
       } catch (unknownError) {
         if (selectedModel && selectedModel !== MODEL_FALLBACK_ID && isUnsupportedChatGptModelError(unknownError)) {
           await applyFallbackModelSelection()
-          threadId = await startThread(targetCwd || undefined, MODEL_FALLBACK_ID)
+          threadId = await startThread(targetCwd || undefined, MODEL_FALLBACK_ID, executionPrefs)
         } else {
           throw unknownError
         }
@@ -2463,6 +2617,7 @@ export function useDesktopState() {
   ): Promise<void> {
     const modelId = selectedModelId.value.trim()
     const reasoningEffort = selectedReasoningEffort.value
+    const executionPrefs = getProjectExecutionPrefs(getThreadCwd(threadId))
     const normalizedText = nextText.trim()
     const normalizedSkills = skills.map((skill) => ({ name: skill.name, path: skill.path }))
     const normalizedFileAttachments = fileAttachments.map((file) => ({ ...file }))
@@ -2490,6 +2645,11 @@ export function useDesktopState() {
           reasoningEffort || undefined,
           skills.length > 0 ? skills : undefined,
           fileAttachments,
+          {
+            approvalPolicy: executionPrefs.approvalPolicy,
+            sandboxMode: executionPrefs.sandboxMode,
+            cwd: getThreadCwd(threadId),
+          },
         )
       } catch (unknownError) {
         if (modelId && modelId !== MODEL_FALLBACK_ID && isUnsupportedChatGptModelError(unknownError)) {
@@ -2510,6 +2670,11 @@ export function useDesktopState() {
             reasoningEffort || undefined,
             skills.length > 0 ? skills : undefined,
             fileAttachments,
+            {
+              approvalPolicy: executionPrefs.approvalPolicy,
+              sandboxMode: executionPrefs.sandboxMode,
+              cwd: getThreadCwd(threadId),
+            },
           )
         } else {
           throw unknownError
@@ -2743,17 +2908,23 @@ export function useDesktopState() {
     isPolling.value = true
 
     try {
+      const activeThreadId = selectedThreadId.value
+      if (!activeThreadId) return
+
+      const isInProgress = inProgressById.value[activeThreadId] === true
+      if (isInProgress) {
+        await loadMessages(activeThreadId, { silent: true })
+        return
+      }
+
       await loadThreads()
 
-      if (!selectedThreadId.value) return
-
-      const threadId = selectedThreadId.value
+      const threadId = activeThreadId
       const currentVersion = currentThreadVersion(threadId)
       const loadedVersion = loadedVersionByThreadId.value[threadId] ?? ''
       const hasVersionChange = currentVersion.length > 0 && currentVersion !== loadedVersion
-      const isInProgress = inProgressById.value[threadId] === true
 
-      if (isInProgress || hasVersionChange) {
+      if (hasVersionChange) {
         await loadMessages(threadId, { silent: true })
       }
     } catch {
@@ -2816,15 +2987,63 @@ export function useDesktopState() {
     }
   }
 
+  function ensureInProgressSyncInterval(): void {
+    if (typeof window === 'undefined' || inProgressSyncInterval !== null) return
+
+    inProgressSyncInterval = window.setInterval(() => {
+      if (document.hidden) return
+      const activeThreadId = selectedThreadId.value
+      if (!activeThreadId || inProgressById.value[activeThreadId] !== true) return
+      void syncThreadStatus()
+    }, IN_PROGRESS_FALLBACK_SYNC_MS)
+  }
+
+  function clearInProgressSyncInterval(): void {
+    if (inProgressSyncInterval === null || typeof window === 'undefined') return
+    window.clearInterval(inProgressSyncInterval)
+    inProgressSyncInterval = null
+  }
+
   function startPolling(): void {
     if (typeof window === 'undefined') return
 
     if (stopNotificationStream) return
+    ensureInProgressSyncInterval()
     void loadPendingServerRequestsFromBridge()
     stopNotificationStream = subscribeCodexNotifications((notification) => {
       applyRealtimeUpdates(notification)
       queueEventDrivenSync(notification)
     })
+  }
+
+  async function resyncRealtimeState(): Promise<void> {
+    if (realtimeResyncPromise) {
+      await realtimeResyncPromise
+      return
+    }
+
+    realtimeResyncPromise = (async () => {
+      if (stopNotificationStream) {
+        stopNotificationStream()
+        stopNotificationStream = null
+      }
+
+      startPolling()
+      await loadThreads()
+
+      if (selectedThreadId.value) {
+        await loadMessages(selectedThreadId.value, { silent: true })
+      }
+
+      await loadPendingServerRequestsFromBridge()
+      void refreshRateLimits()
+    })()
+
+    try {
+      await realtimeResyncPromise
+    } finally {
+      realtimeResyncPromise = null
+    }
   }
 
   async function loadPendingServerRequestsFromBridge(): Promise<void> {
@@ -2858,6 +3077,7 @@ export function useDesktopState() {
       stopNotificationStream()
       stopNotificationStream = null
     }
+    clearInProgressSyncInterval()
 
     pendingThreadsRefresh = false
     pendingThreadMessageRefresh.clear()
@@ -2932,6 +3152,7 @@ export function useDesktopState() {
     isInterruptingTurn,
     error,
     refreshAll,
+    refreshNonCriticalState,
     refreshSkills,
     selectThread,
     setThreadScrollState,
@@ -2945,6 +3166,8 @@ export function useDesktopState() {
     selectedThreadQueuedMessages,
     removeQueuedMessage,
     steerQueuedMessage,
+    getProjectExecutionPrefs,
+    updateProjectExecutionPrefs,
     setSelectedModelId,
     setSelectedReasoningEffort,
     respondToPendingServerRequest,
@@ -2952,6 +3175,7 @@ export function useDesktopState() {
     removeProject,
     reorderProject,
     pinProjectToTop,
+    resyncRealtimeState,
     startPolling,
     stopPolling,
   }

@@ -86,6 +86,28 @@
                 <span class="sidebar-settings-label">Click to toggle dictation</span>
                 <span class="sidebar-settings-toggle" :class="{ 'is-on': dictationClickToToggle }" />
               </button>
+              <div class="sidebar-settings-divider" />
+              <div class="sidebar-settings-caption">
+                {{ activeProjectSettingsLabel }}
+              </div>
+              <button
+                class="sidebar-settings-row"
+                type="button"
+                :disabled="!activeProjectSettingsCwd"
+                @click="cycleProjectSandboxMode"
+              >
+                <span class="sidebar-settings-label">Sandbox</span>
+                <span class="sidebar-settings-value">{{ currentProjectSandboxLabel }}</span>
+              </button>
+              <button
+                class="sidebar-settings-row"
+                type="button"
+                :disabled="!activeProjectSettingsCwd"
+                @click="cycleProjectApprovalPolicy"
+              >
+                <span class="sidebar-settings-label">Approval</span>
+                <span class="sidebar-settings-value">{{ currentProjectApprovalLabel }}</span>
+              </button>
             </div>
           </Transition>
           <button class="sidebar-settings-button" type="button" @click="isSettingsOpen = !isSettingsOpen">
@@ -254,6 +276,7 @@ const {
   isSendingMessage,
   isInterruptingTurn,
   refreshAll,
+  refreshNonCriticalState,
   refreshSkills,
   selectThread,
   setThreadScrollState,
@@ -267,6 +290,8 @@ const {
   selectedThreadQueuedMessages,
   removeQueuedMessage,
   steerQueuedMessage,
+  getProjectExecutionPrefs,
+  updateProjectExecutionPrefs,
   setSelectedModelId,
   setSelectedReasoningEffort,
   respondToPendingServerRequest,
@@ -274,6 +299,7 @@ const {
   removeProject,
   reorderProject,
   pinProjectToTop,
+  resyncRealtimeState,
   startPolling,
   stopPolling,
 } = useDesktopState()
@@ -297,6 +323,7 @@ const isSidebarSearchVisible = ref(false)
 const sidebarSearchInputRef = ref<HTMLInputElement | null>(null)
 const serverMatchedThreadIds = ref<string[] | null>(null)
 let threadSearchTimer: ReturnType<typeof setTimeout> | null = null
+let initialWarmupTimer: number | null = null
 const defaultNewProjectName = ref('New Project (1)')
 const homeDirectory = ref('')
 const isSettingsOpen = ref(false)
@@ -304,6 +331,8 @@ const SEND_WITH_ENTER_KEY = 'codex-web-local.send-with-enter.v1'
 const IN_PROGRESS_SEND_MODE_KEY = 'codex-web-local.in-progress-send-mode.v1'
 const DARK_MODE_KEY = 'codex-web-local.dark-mode.v1'
 const DICTATION_CLICK_TO_TOGGLE_KEY = 'codex-web-local.dictation-click-to-toggle.v1'
+const PROJECT_SANDBOX_MODE_ORDER = ['danger-full-access', 'workspace-write', 'read-only'] as const
+const PROJECT_APPROVAL_POLICY_ORDER = ['never', 'on-request', 'on-failure', 'untrusted'] as const
 const sendWithEnter = ref(loadBoolPref(SEND_WITH_ENTER_KEY, true))
 const inProgressSendMode = ref<'steer' | 'queue'>(loadInProgressSendModePref())
 const darkMode = ref<'system' | 'light' | 'dark'>(loadDarkModePref())
@@ -345,6 +374,26 @@ const composerCwd = computed(() => {
   if (isHomeRoute.value) return newThreadCwd.value.trim()
   return selectedThread.value?.cwd?.trim() ?? ''
 })
+const activeProjectSettingsCwd = computed(() => composerCwd.value.trim())
+const activeProjectExecutionPrefs = computed(() => getProjectExecutionPrefs(activeProjectSettingsCwd.value))
+const activeProjectSettingsLabel = computed(() => {
+  const cwd = activeProjectSettingsCwd.value
+  if (!cwd) return 'Project runtime overrides appear after you choose a project.'
+  return `Project overrides: ${getPathLeafName(cwd)}`
+})
+const currentProjectSandboxLabel = computed(() => {
+  const mode = activeProjectExecutionPrefs.value.sandboxMode
+  if (mode === 'danger-full-access') return 'Full access'
+  if (mode === 'workspace-write') return 'Workspace write'
+  return 'Read only'
+})
+const currentProjectApprovalLabel = computed(() => {
+  const policy = activeProjectExecutionPrefs.value.approvalPolicy
+  if (policy === 'never') return 'Auto approve'
+  if (policy === 'on-request') return 'On request'
+  if (policy === 'on-failure') return 'On failure'
+  return 'Untrusted only'
+})
 const isSelectedThreadInProgress = computed(() => !isHomeRoute.value && selectedThread.value?.inProgress === true)
 const newThreadFolderOptions = computed(() => {
   const options: Array<{ value: string; label: string }> = []
@@ -384,20 +433,27 @@ const darkModeMediaQuery = typeof window !== 'undefined' ? window.matchMedia('(p
 
 onMounted(() => {
   window.addEventListener('keydown', onWindowKeyDown)
+  window.addEventListener('focus', onWindowResume)
+  window.addEventListener('online', onWindowResume)
+  document.addEventListener('visibilitychange', onDocumentVisibilityChange)
   applyDarkMode()
   darkModeMediaQuery?.addEventListener('change', applyDarkMode)
   void initialize()
-  void loadHomeDirectory()
-  void loadWorkspaceRootOptionsState()
-  void refreshDefaultProjectName()
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onWindowKeyDown)
+  window.removeEventListener('focus', onWindowResume)
+  window.removeEventListener('online', onWindowResume)
+  document.removeEventListener('visibilitychange', onDocumentVisibilityChange)
   darkModeMediaQuery?.removeEventListener('change', applyDarkMode)
   if (threadSearchTimer) {
     clearTimeout(threadSearchTimer)
     threadSearchTimer = null
+  }
+  if (initialWarmupTimer) {
+    clearTimeout(initialWarmupTimer)
+    initialWarmupTimer = null
   }
   stopPolling()
 })
@@ -814,6 +870,22 @@ function toggleDictationClickToToggle(): void {
   window.localStorage.setItem(DICTATION_CLICK_TO_TOGGLE_KEY, dictationClickToToggle.value ? '1' : '0')
 }
 
+function cycleProjectSandboxMode(): void {
+  const cwd = activeProjectSettingsCwd.value
+  if (!cwd) return
+  const currentIndex = PROJECT_SANDBOX_MODE_ORDER.indexOf(activeProjectExecutionPrefs.value.sandboxMode)
+  const nextMode = PROJECT_SANDBOX_MODE_ORDER[(currentIndex + 1) % PROJECT_SANDBOX_MODE_ORDER.length]
+  updateProjectExecutionPrefs(cwd, { sandboxMode: nextMode })
+}
+
+function cycleProjectApprovalPolicy(): void {
+  const cwd = activeProjectSettingsCwd.value
+  if (!cwd) return
+  const currentIndex = PROJECT_APPROVAL_POLICY_ORDER.indexOf(activeProjectExecutionPrefs.value.approvalPolicy)
+  const nextPolicy = PROJECT_APPROVAL_POLICY_ORDER[(currentIndex + 1) % PROJECT_APPROVAL_POLICY_ORDER.length]
+  updateProjectExecutionPrefs(cwd, { approvalPolicy: nextPolicy })
+}
+
 function applyDarkMode(): void {
   const root = document.documentElement
   if (darkMode.value === 'dark') {
@@ -845,10 +917,37 @@ function normalizeMessageType(rawType: string | undefined, role: string): string
 }
 
 async function initialize(): Promise<void> {
-  await refreshAll()
+  await refreshAll({ includeSelectedThreadMessages: false, includeNonCriticalState: false })
   hasInitialized.value = true
   await syncThreadSelectionWithRoute()
+  refreshNonCriticalState()
   startPolling()
+  scheduleDeferredBootstrapTasks()
+}
+
+function scheduleDeferredBootstrapTasks(): void {
+  if (typeof window === 'undefined') return
+  if (initialWarmupTimer) {
+    clearTimeout(initialWarmupTimer)
+  }
+
+  initialWarmupTimer = window.setTimeout(() => {
+    initialWarmupTimer = null
+    void loadHomeDirectory()
+    void loadWorkspaceRootOptionsState()
+    void refreshDefaultProjectName()
+  }, 1200)
+}
+
+function onDocumentVisibilityChange(): void {
+  if (document.visibilityState === 'visible') {
+    onWindowResume()
+  }
+}
+
+function onWindowResume(): void {
+  if (!hasInitialized.value) return
+  void resyncRealtimeState()
 }
 
 async function syncThreadSelectionWithRoute(): Promise<void> {
@@ -1167,8 +1266,20 @@ async function submitFirstMessageForNewThread(
   @apply flex items-center justify-between w-full px-3 py-2.5 text-sm text-zinc-700 border-0 bg-transparent transition hover:bg-zinc-50 cursor-pointer;
 }
 
+.sidebar-settings-row:disabled {
+  @apply cursor-not-allowed text-zinc-400 hover:bg-transparent;
+}
+
 .sidebar-settings-row + .sidebar-settings-row {
   @apply border-t border-zinc-100;
+}
+
+.sidebar-settings-divider {
+  @apply h-px bg-zinc-100;
+}
+
+.sidebar-settings-caption {
+  @apply px-3 py-2 text-[11px] uppercase tracking-[0.12em] text-zinc-500 bg-zinc-50/80;
 }
 
 .sidebar-settings-label {

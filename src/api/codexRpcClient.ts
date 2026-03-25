@@ -141,6 +141,9 @@ function toNotification(value: unknown): RpcNotification | null {
   }
 }
 
+const WS_OPEN_GRACE_MS = 2500
+const STREAM_RECONNECT_DELAY_MS = 1500
+
 export function subscribeRpcNotifications(onNotification: (value: RpcNotification) => void): () => void {
   if (typeof window === 'undefined') {
     return () => {}
@@ -148,36 +151,95 @@ export function subscribeRpcNotifications(onNotification: (value: RpcNotificatio
 
   let cleanup: (() => void) | null = null
   let closed = false
+  let reconnectTimer: number | null = null
 
-  const attachSse = () => {
+  const clearReconnectTimer = () => {
+    if (reconnectTimer !== null) {
+      window.clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }
+
+  const clearCurrentStream = () => {
+    cleanup?.()
+    cleanup = null
+  }
+
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer !== null) return
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null
+      connect()
+    }, STREAM_RECONNECT_DELAY_MS)
+  }
+
+  const forwardNotification = (value: unknown) => {
+    const notification = toNotification(value)
+    if (notification) {
+      onNotification(notification)
+    }
+  }
+
+  const connectSse = () => {
     if (typeof EventSource === 'undefined' || closed) return
+
+    clearCurrentStream()
     const source = new EventSource('/codex-api/events')
+    let disposed = false
+    let settled = false
+
+    source.onopen = () => {
+      if (disposed) return
+      settled = true
+    }
 
     source.onmessage = (event) => {
       try {
-        const parsed = JSON.parse(event.data) as unknown
-        const notification = toNotification(parsed)
-        if (notification) {
-          onNotification(notification)
-        }
+        forwardNotification(JSON.parse(event.data) as unknown)
       } catch {
         // Ignore malformed event payloads and keep stream alive.
       }
     }
-    cleanup = () => source.close()
+
+    source.onerror = () => {
+      if (disposed) return
+      source.close()
+      cleanup = null
+      if (!settled && typeof WebSocket !== 'undefined') {
+        connect()
+        return
+      }
+      scheduleReconnect()
+    }
+
+    cleanup = () => {
+      disposed = true
+      source.close()
+    }
   }
 
-  if (typeof WebSocket !== 'undefined') {
+  const connect = () => {
+    if (closed) return
+    clearReconnectTimer()
+
+    if (typeof WebSocket === 'undefined') {
+      connectSse()
+      return
+    }
+
+    clearCurrentStream()
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(`${protocol}//${window.location.host}/codex-api/ws`)
+    let disposed = false
     let didOpen = false
     let fallbackTimer: number | null = window.setTimeout(() => {
       if (didOpen || closed) return
       socket.close()
-      attachSse()
-    }, 2500)
+      connectSse()
+    }, WS_OPEN_GRACE_MS)
 
     socket.onopen = () => {
+      if (disposed) return
       didOpen = true
       if (fallbackTimer !== null) {
         window.clearTimeout(fallbackTimer)
@@ -187,40 +249,51 @@ export function subscribeRpcNotifications(onNotification: (value: RpcNotificatio
 
     socket.onmessage = (event) => {
       try {
-        const parsed = JSON.parse(String(event.data)) as unknown
-        const notification = toNotification(parsed)
-        if (notification) {
-          onNotification(notification)
-        }
+        forwardNotification(JSON.parse(String(event.data)) as unknown)
       } catch {
         // Ignore malformed event payloads and keep stream alive.
       }
     }
 
     socket.onerror = () => {
+      if (disposed) return
       if (!didOpen && !closed) {
-        attachSse()
+        connectSse()
       }
     }
 
     socket.onclose = () => {
+      if (disposed) return
       if (fallbackTimer !== null) {
         window.clearTimeout(fallbackTimer)
         fallbackTimer = null
       }
-      if (!didOpen && !closed) {
-        attachSse()
+
+      if (closed) return
+      if (!didOpen) {
+        connectSse()
+        return
       }
+
+      scheduleReconnect()
     }
 
-    cleanup = () => socket.close()
-  } else {
-    attachSse()
+    cleanup = () => {
+      disposed = true
+      if (fallbackTimer !== null) {
+        window.clearTimeout(fallbackTimer)
+        fallbackTimer = null
+      }
+      socket.close()
+    }
   }
+
+  connect()
 
   return () => {
     closed = true
-    cleanup?.()
+    clearReconnectTimer()
+    clearCurrentStream()
   }
 }
 
