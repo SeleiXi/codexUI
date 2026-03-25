@@ -4,16 +4,6 @@ import type { RequestHandler, Request, Response, NextFunction } from 'express'
 
 const TOKEN_COOKIE = 'portal_session'
 
-function isLocalhostRequest(req: Request): boolean {
-  const remote = req.socket.remoteAddress ?? ''
-  if (remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') {
-    return true
-  }
-
-  const host = (req.headers.host ?? '').toLowerCase()
-  return host.startsWith('localhost:') || host === 'localhost' || host.startsWith('127.0.0.1:')
-}
-
 function constantTimeCompare(a: string, b: string): boolean {
   const bufA = Buffer.from(a)
   const bufB = Buffer.from(b)
@@ -50,7 +40,9 @@ function isAuthorizedByRequestLike(
   validTokens: Set<string>,
 ): boolean {
   const remote = remoteAddress ?? ''
-  if (isLocalhostRemote(remote) || isLocalhostHost(hostHeader ?? '')) {
+  // SSH reverse tunnels terminate on loopback, so remoteAddress alone is not enough
+  // to prove this is a direct local browser request.
+  if (isLocalhostRemote(remote) && isLocalhostHost(hostHeader ?? '')) {
     return true
   }
 

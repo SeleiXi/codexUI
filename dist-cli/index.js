@@ -2552,7 +2552,7 @@ function isLocalhostHost(host) {
 }
 function isAuthorizedByRequestLike(remoteAddress, hostHeader, cookieHeader, validTokens) {
   const remote = remoteAddress ?? "";
-  if (isLocalhostRemote(remote) || isLocalhostHost(hostHeader ?? "")) {
+  if (isLocalhostRemote(remote) && isLocalhostHost(hostHeader ?? "")) {
     return true;
   }
   const cookies = parseCookies(cookieHeader);
