@@ -3,7 +3,7 @@
     <p v-if="isLoading" class="conversation-loading">Loading messages...</p>
 
     <p
-      v-else-if="messages.length === 0 && pendingRequests.length === 0 && !liveOverlay"
+      v-else-if="visibleMessages.length === 0 && pendingRequests.length === 0 && !liveOverlay"
       class="conversation-empty"
     >
       No messages in this thread yet.
@@ -84,7 +84,7 @@
       </li>
 
       <li
-        v-for="message in messages"
+        v-for="message in visibleMessages"
         :key="message.id"
         class="conversation-item"
         :class="{ 'conversation-item-actionable': canShowMessageActions(message) }"
@@ -144,12 +144,7 @@
                 </span>
               </div>
 
-              <article
-                v-if="message.text.length > 0"
-                class="message-card"
-                :class="{ 'message-tool-card': message.messageType === 'toolInvocation' }"
-                :data-role="message.role"
-              >
+              <article v-if="message.text.length > 0" class="message-card" :data-role="message.role">
                 <div v-if="message.messageType === 'worked'" class="worked-separator-wrap" aria-live="polite">
                   <button type="button" class="worked-separator" @click="toggleWorkedExpand(message)">
                     <span class="worked-separator-line" aria-hidden="true" />
@@ -159,7 +154,7 @@
                   </button>
                   <div v-if="isWorkedExpanded(message)" class="worked-details">
                     <div
-                      v-for="cmd in getCommandsForWorked(messages, messages.indexOf(message))"
+                      v-for="cmd in getCommandsForWorked(props.messages, props.messages.indexOf(message))"
                       :key="`worked-cmd-${cmd.id}`"
                       class="worked-cmd-item"
                     >
@@ -290,7 +285,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { ThreadScrollState, UiLiveOverlay, UiMessage, UiServerRequest } from '../../types/codex'
 import IconTablerX from '../icons/IconTablerX.vue'
 import IconTablerArrowBackUp from '../icons/IconTablerArrowBackUp.vue'
@@ -303,6 +298,10 @@ const prevCommandStatuses = ref<Record<string, string>>({})
 
 function isCommandMessage(message: UiMessage): boolean {
   return message.messageType === 'commandExecution' && !!message.commandExecution
+}
+
+function shouldHideTimelineMessage(message: UiMessage): boolean {
+  return isCommandMessage(message) || message.messageType === 'toolInvocation'
 }
 
 function isCommandExpanded(message: UiMessage): boolean {
@@ -386,6 +385,10 @@ const props = defineProps<{
   isTurnInProgress?: boolean
   isRollingBack?: boolean
 }>()
+
+const visibleMessages = computed<UiMessage[]>(() =>
+  props.messages.filter((message) => !shouldHideTimelineMessage(message)),
+)
 
 const emit = defineEmits<{
   updateScrollState: [payload: { threadId: string; state: ThreadScrollState }]
@@ -1225,9 +1228,7 @@ async function scheduleScrollRestore(): Promise<void> {
 
 watch(
   () => props.messages,
-  async (next) => {
-    if (props.isLoading) return
-
+  (next) => {
     for (const m of next) {
       if (m.messageType !== 'commandExecution' || !m.commandExecution) continue
       const prev = prevCommandStatuses.value[m.id]
@@ -1237,6 +1238,13 @@ watch(
       }
       prevCommandStatuses.value[m.id] = cur
     }
+  },
+)
+
+watch(
+  visibleMessages,
+  async (next) => {
+    if (props.isLoading) return
 
     await scheduleScrollRestore()
   },
@@ -1546,14 +1554,6 @@ onBeforeUnmount(() => {
 .message-card[data-role='assistant'],
 .message-card[data-role='system'] {
   @apply px-0 py-0 bg-transparent border-none rounded-none;
-}
-
-.message-tool-card {
-  @apply rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 max-w-[min(76ch,100%)];
-}
-
-.message-tool-card .message-text {
-  @apply text-xs leading-relaxed font-mono text-zinc-700;
 }
 
 .conversation-item[data-message-type='worked'] .message-stack,

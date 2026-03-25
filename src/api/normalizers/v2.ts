@@ -25,32 +25,6 @@ function toRawPayload(value: unknown): string {
   }
 }
 
-function summarizeJsonValue(value: unknown, maxLength = 160): string {
-  const raw = toRawPayload(value).replace(/\s+/gu, ' ').trim()
-  if (raw.length <= maxLength) return raw
-  return `${raw.slice(0, maxLength - 1)}…`
-}
-
-function formatStatus(value: unknown): string {
-  if (typeof value !== 'string' || !value) return 'Unknown'
-  if (value === 'inProgress') return 'Running'
-  return `${value[0]?.toUpperCase() ?? ''}${value.slice(1)}`
-}
-
-function buildSystemMessage(id: string, messageType: string, lines: Array<string | null | undefined>, rawPayload?: unknown): UiMessage[] {
-  const text = lines.filter((line): line is string => typeof line === 'string' && line.trim().length > 0).join('\n')
-  if (!text) return []
-  return [
-    {
-      id,
-      role: 'system',
-      text,
-      messageType,
-      rawPayload: rawPayload === undefined ? undefined : toRawPayload(rawPayload),
-    },
-  ]
-}
-
 const FILE_ATTACHMENT_LINE = /^##\s+(.+?):\s+(.+?)\s*$/
 const FILES_MENTIONED_MARKER = /^#\s*files mentioned by the user\s*:?\s*$/i
 
@@ -184,70 +158,6 @@ function toUiMessages(item: ThreadItem): UiMessage[] {
         commandExecution: { command: cmd, cwd, status, aggregatedOutput, exitCode },
       },
     ]
-  }
-
-  if (item.type === 'mcpToolCall') {
-    const raw = item as Record<string, unknown>
-    const server = typeof raw.server === 'string' ? raw.server : 'mcp'
-    const tool = typeof raw.tool === 'string' ? raw.tool : 'tool'
-    const status = formatStatus(raw.status)
-    const error = raw.error && typeof raw.error === 'object' ? (raw.error as Record<string, unknown>).message : ''
-    const result = raw.result && typeof raw.result === 'object' ? summarizeJsonValue(raw.result) : ''
-    const input = raw.arguments !== undefined ? summarizeJsonValue(raw.arguments) : ''
-    return buildSystemMessage(item.id, 'toolInvocation', [
-      `Tool: ${server}.${tool}`,
-      `Status: ${status}`,
-      input ? `Input: ${input}` : '',
-      error && typeof error === 'string' ? `Error: ${error}` : '',
-      result ? `Result: ${result}` : '',
-    ], item)
-  }
-
-  if (item.type === 'collabAgentToolCall') {
-    const raw = item as Record<string, unknown>
-    const tool = typeof raw.tool === 'string' ? raw.tool : 'agent_tool'
-    const status = formatStatus(raw.status)
-    const prompt = typeof raw.prompt === 'string' ? raw.prompt.trim() : ''
-    const receivers = Array.isArray(raw.receiverThreadIds) ? raw.receiverThreadIds.length : 0
-    return buildSystemMessage(item.id, 'toolInvocation', [
-      `Tool: ${tool}`,
-      `Status: ${status}`,
-      receivers > 0 ? `Agents: ${String(receivers)}` : '',
-      prompt ? `Prompt: ${prompt}` : '',
-    ], item)
-  }
-
-  if (item.type === 'webSearch') {
-    const raw = item as Record<string, unknown>
-    const action = raw.action && typeof raw.action === 'object' ? raw.action as Record<string, unknown> : null
-    const actionType = typeof action?.type === 'string' ? action.type : 'other'
-    const query = typeof raw.query === 'string' ? raw.query : ''
-    const url = typeof action?.url === 'string' ? action.url : ''
-    const pattern = typeof action?.pattern === 'string' ? action.pattern : ''
-    return buildSystemMessage(item.id, 'toolInvocation', [
-      'Tool: web.search',
-      `Action: ${actionType}`,
-      query ? `Query: ${query}` : '',
-      url ? `URL: ${url}` : '',
-      pattern ? `Find: ${pattern}` : '',
-    ], item)
-  }
-
-  if (item.type === 'imageView') {
-    const raw = item as Record<string, unknown>
-    const path = typeof raw.path === 'string' ? raw.path : ''
-    return buildSystemMessage(item.id, 'toolInvocation', [
-      'Tool: view_image',
-      path ? `Path: ${path}` : '',
-    ], item)
-  }
-
-  if (item.type === 'fileChange') {
-    const raw = item as Record<string, unknown>
-    return buildSystemMessage(item.id, 'toolInvocation', [
-      'Tool: apply_patch',
-      `Status: ${formatStatus(raw.status)}`,
-    ], item)
   }
 
   return []

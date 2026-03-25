@@ -167,19 +167,6 @@ export function subscribeRpcNotifications(onNotification: (value: RpcNotificatio
     cleanup = () => source.close()
   }
 
-  const shouldPreferSse = () => {
-    const host = window.location.hostname.toLowerCase()
-    return host === 'seleixi.com' || host.endsWith('.seleixi.com')
-  }
-
-  if (shouldPreferSse()) {
-    attachSse()
-    return () => {
-      closed = true
-      cleanup?.()
-    }
-  }
-
   if (typeof WebSocket !== 'undefined') {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(`${protocol}//${window.location.host}/codex-api/ws`)

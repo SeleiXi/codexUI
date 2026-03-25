@@ -1402,6 +1402,25 @@ async function readCodexAuth() {
 function getCodexGlobalStatePath() {
   return join2(getCodexHomeDir2(), ".codex-global-state.json");
 }
+function shouldDegradeRateLimitsError(method, error) {
+  if (method !== "account/rateLimits/read") return false;
+  const message = getErrorMessage2(error, "").toLowerCase();
+  if (!message) return false;
+  return message.includes("failed to fetch codex rate limits") || message.includes("wham/usage failed") || message.includes("403 forbidden") && message.includes("chatgpt.com");
+}
+function buildEmptyRateLimitsPayload() {
+  return {
+    rateLimits: {
+      limitId: null,
+      limitName: null,
+      primary: null,
+      secondary: null,
+      credits: null,
+      planType: null
+    },
+    rateLimitsByLimitId: {}
+  };
+}
 function getCodexSessionIndexPath() {
   return join2(getCodexHomeDir2(), "session_index.jsonl");
 }
@@ -1896,7 +1915,14 @@ var AppServerProcess = class {
   }
   async rpc(method, params) {
     await this.ensureInitialized();
-    return this.call(method, params);
+    try {
+      return await this.call(method, params);
+    } catch (error) {
+      if (shouldDegradeRateLimitsError(method, error)) {
+        return buildEmptyRateLimitsPayload();
+      }
+      throw error;
+    }
   }
   onNotification(listener) {
     this.notificationListeners.add(listener);
@@ -2498,7 +2524,7 @@ data: ${JSON.stringify({ ok: true })}
 
 // src/server/authMiddleware.ts
 import { randomBytes as randomBytes2, timingSafeEqual } from "crypto";
-var TOKEN_COOKIE = "codex_web_local_token";
+var TOKEN_COOKIE = "portal_session";
 function constantTimeCompare(a, b) {
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
@@ -2538,7 +2564,7 @@ var LOGIN_PAGE_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Codex Web Local &mdash; Login</title>
+<title>Workspace Portal</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0a0a;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem}
@@ -2554,12 +2580,12 @@ button:hover{background:#2563eb}
 </head>
 <body>
 <div class="card">
-<h1>Codex Web Local</h1>
+<h1>Workspace Portal</h1>
 <form id="f">
-<label for="pw">Password</label>
+<label for="pw">Access Code</label>
 <input id="pw" name="password" type="password" autocomplete="current-password" autofocus required>
-<button type="submit">Sign in</button>
-<p class="error" id="err">Incorrect password</p>
+<button type="submit">Continue</button>
+<p class="error" id="err">Incorrect access code</p>
 </form>
 </div>
 <script>

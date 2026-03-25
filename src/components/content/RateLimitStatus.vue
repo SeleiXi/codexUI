@@ -45,7 +45,9 @@ function getSnapshotKey(snapshot: UiRateLimitSnapshot): string {
 }
 
 function getSnapshotTitle(snapshot: UiRateLimitSnapshot): string {
-  return snapshot.limitName?.trim() || snapshot.limitId?.trim() || 'Rate limits'
+  const rawTitle = snapshot.limitName?.trim() || snapshot.limitId?.trim() || 'Rate limits'
+  if (rawTitle.toLowerCase() === 'codex') return 'Codex'
+  return rawTitle
 }
 
 function formatPlanType(value: string): string {

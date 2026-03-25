@@ -47,31 +47,11 @@ const SCROLL_STATE_STORAGE_KEY = 'codex-web-local.thread-scroll-state.v1'
 const SELECTED_THREAD_STORAGE_KEY = 'codex-web-local.selected-thread-id.v1'
 const PROJECT_ORDER_STORAGE_KEY = 'codex-web-local.project-order.v1'
 const PROJECT_DISPLAY_NAME_STORAGE_KEY = 'codex-web-local.project-display-name.v1'
-const QUEUED_MESSAGES_STORAGE_KEY = 'codex-web-local.queued-messages.v1'
-const PROJECT_EXECUTION_PREFS_STORAGE_KEY = 'codex-web-local.project-execution-prefs.v1'
 const EVENT_SYNC_DEBOUNCE_MS = 220
 const RATE_LIMIT_REFRESH_DEBOUNCE_MS = 500
 const REASONING_EFFORT_OPTIONS: ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']
 const GLOBAL_SERVER_REQUEST_SCOPE = '__global__'
 const MODEL_FALLBACK_ID = 'gpt-5.2-codex'
-type FileAttachment = { label: string; path: string; fsPath: string }
-type QueuedMessage = {
-  id: string
-  text: string
-  imageUrls: string[]
-  skills: Array<{ name: string; path: string }>
-  fileAttachments: FileAttachment[]
-}
-type ApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never'
-type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
-type ProjectExecutionPrefs = {
-  approvalPolicy: ApprovalPolicy
-  sandboxMode: SandboxMode
-}
-const DEFAULT_PROJECT_EXECUTION_PREFS: ProjectExecutionPrefs = {
-  approvalPolicy: 'never',
-  sandboxMode: 'danger-full-access',
-}
 
 function loadReadStateMap(): Record<string, string> {
   if (typeof window === 'undefined') return {}
@@ -211,115 +191,6 @@ function loadProjectDisplayNames(): Record<string, string> {
 function saveProjectDisplayNames(displayNames: Record<string, string>): void {
   if (typeof window === 'undefined') return
   window.localStorage.setItem(PROJECT_DISPLAY_NAME_STORAGE_KEY, JSON.stringify(displayNames))
-}
-
-function isFileAttachment(value: unknown): value is FileAttachment {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const row = value as Record<string, unknown>
-  return typeof row.label === 'string' && typeof row.path === 'string' && typeof row.fsPath === 'string'
-}
-
-function loadQueuedMessagesMap(): Record<string, QueuedMessage[]> {
-  if (typeof window === 'undefined') return {}
-
-  try {
-    const raw = window.localStorage.getItem(QUEUED_MESSAGES_STORAGE_KEY)
-    if (!raw) return {}
-
-    const parsed = JSON.parse(raw) as unknown
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-
-    const normalized: Record<string, QueuedMessage[]> = {}
-    for (const [threadId, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!threadId || !Array.isArray(value)) continue
-
-      const queue = value
-        .map((row): QueuedMessage | null => {
-          if (!row || typeof row !== 'object' || Array.isArray(row)) return null
-          const message = row as Record<string, unknown>
-          const id = typeof message.id === 'string' ? message.id : ''
-          if (!id) return null
-
-          return {
-            id,
-            text: typeof message.text === 'string' ? message.text : '',
-            imageUrls: Array.isArray(message.imageUrls)
-              ? message.imageUrls.filter((item): item is string => typeof item === 'string')
-              : [],
-            skills: Array.isArray(message.skills)
-              ? message.skills
-                .map((skill) => (skill && typeof skill === 'object' && !Array.isArray(skill) ? skill as Record<string, unknown> : null))
-                .filter((skill): skill is Record<string, unknown> => skill !== null)
-                .map((skill) => ({
-                  name: typeof skill.name === 'string' ? skill.name : '',
-                  path: typeof skill.path === 'string' ? skill.path : '',
-                }))
-                .filter((skill) => skill.name.length > 0 && skill.path.length > 0)
-              : [],
-            fileAttachments: Array.isArray(message.fileAttachments)
-              ? message.fileAttachments.filter(isFileAttachment).map((attachment) => ({ ...attachment }))
-              : [],
-          }
-        })
-        .filter((row): row is QueuedMessage => row !== null)
-
-      if (queue.length > 0) {
-        normalized[threadId] = queue
-      }
-    }
-
-    return normalized
-  } catch {
-    return {}
-  }
-}
-
-function saveQueuedMessagesMap(state: Record<string, QueuedMessage[]>): void {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem(QUEUED_MESSAGES_STORAGE_KEY, JSON.stringify(state))
-}
-
-function normalizeProjectCwdKey(cwd: string): string {
-  return cwd.trim().replace(/\\/gu, '/')
-}
-
-function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
-  return value === 'untrusted' || value === 'on-failure' || value === 'on-request' || value === 'never'
-}
-
-function isSandboxMode(value: unknown): value is SandboxMode {
-  return value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access'
-}
-
-function loadProjectExecutionPrefsMap(): Record<string, ProjectExecutionPrefs> {
-  if (typeof window === 'undefined') return {}
-
-  try {
-    const raw = window.localStorage.getItem(PROJECT_EXECUTION_PREFS_STORAGE_KEY)
-    if (!raw) return {}
-
-    const parsed = JSON.parse(raw) as unknown
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-
-    const normalized: Record<string, ProjectExecutionPrefs> = {}
-    for (const [cwd, value] of Object.entries(parsed as Record<string, unknown>)) {
-      const key = normalizeProjectCwdKey(cwd)
-      if (!key || !value || typeof value !== 'object' || Array.isArray(value)) continue
-      const row = value as Record<string, unknown>
-      normalized[key] = {
-        approvalPolicy: isApprovalPolicy(row.approvalPolicy) ? row.approvalPolicy : DEFAULT_PROJECT_EXECUTION_PREFS.approvalPolicy,
-        sandboxMode: isSandboxMode(row.sandboxMode) ? row.sandboxMode : DEFAULT_PROJECT_EXECUTION_PREFS.sandboxMode,
-      }
-    }
-    return normalized
-  } catch {
-    return {}
-  }
-}
-
-function saveProjectExecutionPrefsMap(state: Record<string, ProjectExecutionPrefs>): void {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem(PROJECT_EXECUTION_PREFS_STORAGE_KEY, JSON.stringify(state))
 }
 
 function mergeProjectOrder(previousOrder: string[], incomingGroups: UiProjectGroup[]): string[] {
@@ -750,10 +621,13 @@ export function useDesktopState() {
   const sourceGroups = ref<UiProjectGroup[]>([])
   const selectedThreadId = ref(loadSelectedThreadId())
   const persistedMessagesByThreadId = ref<Record<string, UiMessage[]>>({})
+  const optimisticUserMessagesByThreadId = ref<Record<string, UiMessage[]>>({})
   const liveAgentMessagesByThreadId = ref<Record<string, UiMessage[]>>({})
   const liveReasoningTextByThreadId = ref<Record<string, string>>({})
   const liveCommandsByThreadId = ref<Record<string, UiMessage[]>>({})
   const inProgressById = ref<Record<string, boolean>>({})
+  type FileAttachment = { label: string; path: string; fsPath: string }
+  type QueuedMessage = { id: string; text: string; imageUrls: string[]; skills: Array<{ name: string; path: string }>; fileAttachments: FileAttachment[] }
   type PendingTurnRequest = {
     text: string
     imageUrls: string[]
@@ -762,8 +636,7 @@ export function useDesktopState() {
     effort: ReasoningEffort | ''
     fallbackRetried: boolean
   }
-  const queuedMessagesByThreadId = ref<Record<string, QueuedMessage[]>>(loadQueuedMessagesMap())
-  const projectExecutionPrefsByCwd = ref<Record<string, ProjectExecutionPrefs>>(loadProjectExecutionPrefsMap())
+  const queuedMessagesByThreadId = ref<Record<string, QueuedMessage[]>>({})
   const eventUnreadByThreadId = ref<Record<string, boolean>>({})
   const availableModelIds = ref<string[]>([])
   const selectedModelId = ref('')
@@ -846,9 +719,10 @@ export function useDesktopState() {
     if (!threadId) return []
 
     const persisted = persistedMessagesByThreadId.value[threadId] ?? []
+    const optimisticUsers = optimisticUserMessagesByThreadId.value[threadId] ?? []
     const liveAgent = liveAgentMessagesByThreadId.value[threadId] ?? []
     const liveCommands = liveCommandsByThreadId.value[threadId] ?? []
-    const combined = [...persisted, ...liveCommands, ...liveAgent]
+    const combined = [...persisted, ...optimisticUsers, ...liveCommands, ...liveAgent]
 
     const summary = turnSummaryByThreadId.value[threadId]
     if (!summary) return combined
@@ -891,50 +765,6 @@ export function useDesktopState() {
     pendingTurnRequestByThreadId.value = omitKey(pendingTurnRequestByThreadId.value, threadId)
   }
 
-  function getThreadCwd(threadId: string): string {
-    return allThreads.value.find((thread) => thread.id === threadId)?.cwd?.trim() ?? ''
-  }
-
-  function getProjectExecutionPrefs(cwd: string): ProjectExecutionPrefs {
-    const key = normalizeProjectCwdKey(cwd)
-    if (!key) return DEFAULT_PROJECT_EXECUTION_PREFS
-    return projectExecutionPrefsByCwd.value[key] ?? DEFAULT_PROJECT_EXECUTION_PREFS
-  }
-
-  function updateProjectExecutionPrefs(cwd: string, next: Partial<ProjectExecutionPrefs>): void {
-    const key = normalizeProjectCwdKey(cwd)
-    if (!key) return
-
-    const current = getProjectExecutionPrefs(key)
-    const merged: ProjectExecutionPrefs = {
-      approvalPolicy: next.approvalPolicy ?? current.approvalPolicy,
-      sandboxMode: next.sandboxMode ?? current.sandboxMode,
-    }
-
-    const shouldUseDefault =
-      merged.approvalPolicy === DEFAULT_PROJECT_EXECUTION_PREFS.approvalPolicy &&
-      merged.sandboxMode === DEFAULT_PROJECT_EXECUTION_PREFS.sandboxMode
-
-    const nextMap = shouldUseDefault
-      ? omitKey(projectExecutionPrefsByCwd.value, key)
-      : { ...projectExecutionPrefsByCwd.value, [key]: merged }
-
-    projectExecutionPrefsByCwd.value = nextMap
-    saveProjectExecutionPrefsMap(nextMap)
-  }
-
-  function setQueuedMessagesMap(nextMap: Record<string, QueuedMessage[]>): void {
-    queuedMessagesByThreadId.value = nextMap
-    saveQueuedMessagesMap(nextMap)
-  }
-
-  function setQueuedMessagesForThread(threadId: string, queue: QueuedMessage[]): void {
-    const nextMap = queue.length > 0
-      ? { ...queuedMessagesByThreadId.value, [threadId]: queue }
-      : omitKey(queuedMessagesByThreadId.value, threadId)
-    setQueuedMessagesMap(nextMap)
-  }
-
   async function retryPendingTurnWithFallback(threadId: string): Promise<void> {
     if (fallbackRetryInFlightThreadIds.has(threadId)) return
     const pending = pendingTurnRequestByThreadId.value[threadId]
@@ -948,7 +778,6 @@ export function useDesktopState() {
 
     try {
       await applyFallbackModelSelection()
-      const executionPrefs = getProjectExecutionPrefs(getThreadCwd(threadId))
       // Remove the failed user turn before replaying on fallback model to avoid duplicated user messages.
       try {
         const rolledBackMessages = await rollbackThread(threadId, 1)
@@ -982,11 +811,6 @@ export function useDesktopState() {
         pending.effort || undefined,
         pending.skills.length > 0 ? pending.skills : undefined,
         pending.fileAttachments,
-        {
-          approvalPolicy: executionPrefs.approvalPolicy,
-          sandboxMode: executionPrefs.sandboxMode,
-          cwd: getThreadCwd(threadId),
-        },
       )
 
       resumedThreadById.value = {
@@ -994,6 +818,7 @@ export function useDesktopState() {
         [threadId]: true,
       }
 
+      scheduleRateLimitRefresh()
       pendingThreadMessageRefresh.add(threadId)
       pendingThreadsRefresh = true
       await syncFromNotifications()
@@ -1176,6 +1001,7 @@ export function useDesktopState() {
     loadedVersionByThreadId.value = pruneThreadStateMap(loadedVersionByThreadId.value, activeThreadIds)
     resumedThreadById.value = pruneThreadStateMap(resumedThreadById.value, activeThreadIds)
     persistedMessagesByThreadId.value = pruneThreadStateMap(persistedMessagesByThreadId.value, activeThreadIds)
+    optimisticUserMessagesByThreadId.value = pruneThreadStateMap(optimisticUserMessagesByThreadId.value, activeThreadIds)
     liveAgentMessagesByThreadId.value = pruneThreadStateMap(liveAgentMessagesByThreadId.value, activeThreadIds)
     liveReasoningTextByThreadId.value = pruneThreadStateMap(liveReasoningTextByThreadId.value, activeThreadIds)
     liveCommandsByThreadId.value = pruneThreadStateMap(liveCommandsByThreadId.value, activeThreadIds)
@@ -1192,10 +1018,6 @@ export function useDesktopState() {
       }
     }
     pendingServerRequestsByThreadId.value = nextPending
-    const nextQueuedMessages = pruneThreadStateMap(queuedMessagesByThreadId.value, activeThreadIds)
-    if (nextQueuedMessages !== queuedMessagesByThreadId.value) {
-      setQueuedMessagesMap(nextQueuedMessages)
-    }
   }
 
   function markThreadAsRead(threadId: string): void {
@@ -1353,6 +1175,67 @@ export function useDesktopState() {
       ...liveAgentMessagesByThreadId.value,
       [threadId]: nextMessages,
     }
+  }
+
+  function setOptimisticUserMessagesForThread(threadId: string, nextMessages: UiMessage[]): void {
+    const previous = optimisticUserMessagesByThreadId.value[threadId] ?? []
+    if (areMessageArraysEqual(previous, nextMessages)) return
+
+    if (nextMessages.length === 0) {
+      if (!(threadId in optimisticUserMessagesByThreadId.value)) return
+      optimisticUserMessagesByThreadId.value = omitKey(optimisticUserMessagesByThreadId.value, threadId)
+      return
+    }
+
+    optimisticUserMessagesByThreadId.value = {
+      ...optimisticUserMessagesByThreadId.value,
+      [threadId]: nextMessages,
+    }
+  }
+
+  function addOptimisticUserMessage(
+    threadId: string,
+    text: string,
+    imageUrls: string[] = [],
+    fileAttachments: FileAttachment[] = [],
+  ): string {
+    const optimisticId = `optimistic-user:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+    const nextMessage: UiMessage = {
+      id: optimisticId,
+      role: 'user',
+      text,
+      images: [...imageUrls],
+      fileAttachments: fileAttachments.map((file) => ({ label: file.label, path: file.path })),
+      messageType: 'userMessage.optimistic',
+    }
+    const previous = optimisticUserMessagesByThreadId.value[threadId] ?? []
+    setOptimisticUserMessagesForThread(threadId, [...previous, nextMessage])
+    return optimisticId
+  }
+
+  function removeOptimisticUserMessage(threadId: string, messageId: string): void {
+    const previous = optimisticUserMessagesByThreadId.value[threadId] ?? []
+    if (previous.length === 0) return
+    const next = previous.filter((message) => message.id !== messageId)
+    setOptimisticUserMessagesForThread(threadId, next)
+  }
+
+  function hasMatchingPersistedUserMessage(message: UiMessage, persistedMessages: UiMessage[]): boolean {
+    return persistedMessages.some((persistedMessage) => {
+      if (persistedMessage.role !== 'user') return false
+      if (sanitizeDisplayText(persistedMessage.text) !== sanitizeDisplayText(message.text)) return false
+      if (!areStringArraysEqual(persistedMessage.images, message.images)) return false
+      const persistedFilePaths = (persistedMessage.fileAttachments ?? []).map((file) => file.path)
+      const optimisticFilePaths = (message.fileAttachments ?? []).map((file) => file.path)
+      return areStringArraysEqual(persistedFilePaths, optimisticFilePaths)
+    })
+  }
+
+  function reconcileOptimisticUserMessages(threadId: string, persistedMessages: UiMessage[]): void {
+    const optimistic = optimisticUserMessagesByThreadId.value[threadId] ?? []
+    if (optimistic.length === 0) return
+    const next = optimistic.filter((message) => !hasMatchingPersistedUserMessage(message, persistedMessages))
+    setOptimisticUserMessagesForThread(threadId, next)
   }
 
   function upsertLiveAgentMessage(threadId: string, nextMessage: UiMessage): void {
@@ -1636,38 +1519,6 @@ export function useDesktopState() {
           },
         }
       }
-      if (itemType === 'mcptoolcall') {
-        const server = readString(item?.server)
-        const tool = readString(item?.tool)
-        const label = [server, tool].filter(Boolean).join('.')
-        return {
-          threadId,
-          activity: {
-            label: 'Using tool',
-            details: label ? [label] : [],
-          },
-        }
-      }
-      if (itemType === 'collabagenttoolcall') {
-        const tool = readString(item?.tool)
-        return {
-          threadId,
-          activity: {
-            label: 'Using tool',
-            details: tool ? [tool] : [],
-          },
-        }
-      }
-      if (itemType === 'websearch' || itemType === 'imageview' || itemType === 'filechange') {
-        const label = itemType === 'websearch' ? 'web.search' : itemType === 'imageview' ? 'view_image' : 'apply_patch'
-        return {
-          threadId,
-          activity: {
-            label: 'Using tool',
-            details: [label],
-          },
-        }
-      }
     }
 
     if (notification.method === 'item/commandExecution/outputDelta') {
@@ -1676,18 +1527,6 @@ export function useDesktopState() {
         activity: {
           label: 'Running command',
           details: [],
-        },
-      }
-    }
-
-    if (notification.method === 'item/mcpToolCall/progress') {
-      const params = asRecord(notification.params)
-      const message = readString(params?.message)
-      return {
-        threadId,
-        activity: {
-          label: 'Using tool',
-          details: message ? [message] : [],
         },
       }
     }
@@ -1943,123 +1782,6 @@ export function useDesktopState() {
     }
   }
 
-  function summarizeToolPayload(value: unknown, maxLength = 180): string {
-    if (value === undefined || value === null) return ''
-    try {
-      const raw = JSON.stringify(value).replace(/\s+/gu, ' ').trim()
-      if (raw.length <= maxLength) return raw
-      return `${raw.slice(0, maxLength - 1)}…`
-    } catch {
-      return String(value)
-    }
-  }
-
-  function formatToolStatus(value: string): string {
-    if (!value) return 'Unknown'
-    if (value === 'inProgress') return 'Running'
-    return `${value[0]?.toUpperCase() ?? ''}${value.slice(1)}`
-  }
-
-  function buildToolInvocationText(lines: Array<string | null | undefined>): string {
-    return lines.filter((line): line is string => typeof line === 'string' && line.trim().length > 0).join('\n')
-  }
-
-  function buildToolInvocationMessage(item: Record<string, unknown>): UiMessage | null {
-    const id = readString(item.id)
-    const itemType = readString(item.type)
-    if (!id || !itemType) return null
-
-    if (itemType === 'mcpToolCall') {
-      const server = readString(item.server) || 'mcp'
-      const tool = readString(item.tool) || 'tool'
-      const errorMessage = readString(asRecord(item.error)?.message)
-      const text = buildToolInvocationText([
-        `Tool: ${server}.${tool}`,
-        `Status: ${formatToolStatus(readString(item.status))}`,
-        item.arguments !== undefined ? `Input: ${summarizeToolPayload(item.arguments)}` : '',
-        errorMessage ? `Error: ${errorMessage}` : '',
-        item.result !== undefined && item.result !== null ? `Result: ${summarizeToolPayload(item.result)}` : '',
-      ])
-      return text
-        ? { id, role: 'system', text, messageType: 'toolInvocation' }
-        : null
-    }
-
-    if (itemType === 'collabAgentToolCall') {
-      const receiverThreadIds = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []
-      const text = buildToolInvocationText([
-        `Tool: ${readString(item.tool) || 'agent_tool'}`,
-        `Status: ${formatToolStatus(readString(item.status))}`,
-        receiverThreadIds.length > 0 ? `Agents: ${String(receiverThreadIds.length)}` : '',
-        readString(item.prompt) ? `Prompt: ${readString(item.prompt)}` : '',
-      ])
-      return text
-        ? { id, role: 'system', text, messageType: 'toolInvocation' }
-        : null
-    }
-
-    if (itemType === 'webSearch') {
-      const action = asRecord(item.action)
-      const text = buildToolInvocationText([
-        'Tool: web.search',
-        `Action: ${readString(action?.type) || 'other'}`,
-        readString(item.query) ? `Query: ${readString(item.query)}` : '',
-        readString(action?.url) ? `URL: ${readString(action?.url)}` : '',
-        readString(action?.pattern) ? `Find: ${readString(action?.pattern)}` : '',
-      ])
-      return text
-        ? { id, role: 'system', text, messageType: 'toolInvocation' }
-        : null
-    }
-
-    if (itemType === 'imageView') {
-      const path = readString(item.path)
-      return {
-        id,
-        role: 'system',
-        text: buildToolInvocationText(['Tool: view_image', path ? `Path: ${path}` : '']),
-        messageType: 'toolInvocation',
-      }
-    }
-
-    if (itemType === 'fileChange') {
-      return {
-        id,
-        role: 'system',
-        text: buildToolInvocationText(['Tool: apply_patch', `Status: ${formatToolStatus(readString(item.status))}`]),
-        messageType: 'toolInvocation',
-      }
-    }
-
-    return null
-  }
-
-  function readToolInvocationStarted(notification: RpcNotification): UiMessage | null {
-    if (notification.method !== 'item/started') return null
-    const params = asRecord(notification.params)
-    const item = asRecord(params?.item)
-    if (!item) return null
-    return buildToolInvocationMessage(item)
-  }
-
-  function readToolInvocationProgress(notification: RpcNotification): { itemId: string; message: string } | null {
-    if (notification.method !== 'item/mcpToolCall/progress') return null
-    const params = asRecord(notification.params)
-    if (!params) return null
-    const itemId = readString(params.itemId)
-    const message = readString(params.message)
-    if (!itemId || !message) return null
-    return { itemId, message }
-  }
-
-  function readToolInvocationCompleted(notification: RpcNotification): UiMessage | null {
-    if (notification.method !== 'item/completed') return null
-    const params = asRecord(notification.params)
-    const item = asRecord(params?.item)
-    if (!item) return null
-    return buildToolInvocationMessage(item)
-  }
-
   function upsertLiveCommand(threadId: string, msg: UiMessage): void {
     const previous = liveCommandsByThreadId.value[threadId] ?? []
     const next = upsertMessage(previous, msg)
@@ -2303,30 +2025,6 @@ export function useDesktopState() {
       upsertLiveCommand(notificationThreadId, commandCompleted)
     }
 
-    const toolStarted = readToolInvocationStarted(notification)
-    if (toolStarted) {
-      upsertLiveCommand(notificationThreadId, toolStarted)
-    }
-
-    const toolProgress = readToolInvocationProgress(notification)
-    if (toolProgress) {
-      const current = (liveCommandsByThreadId.value[notificationThreadId] ?? []).find((message) => message.id === toolProgress.itemId)
-      if (current) {
-        const nextText = current.text.includes(`Progress: ${toolProgress.message}`)
-          ? current.text
-          : `${current.text}\nProgress: ${toolProgress.message}`
-        upsertLiveCommand(notificationThreadId, {
-          ...current,
-          text: nextText,
-        })
-      }
-    }
-
-    const toolCompleted = readToolInvocationCompleted(notification)
-    if (toolCompleted) {
-      upsertLiveCommand(notificationThreadId, toolCompleted)
-    }
-
     if (isAgentContentEvent(notification)) {
       if (shouldAutoScrollOnNextAgentEvent && selectedThreadId.value) {
         setThreadScrollState(selectedThreadId.value, {
@@ -2522,6 +2220,7 @@ export function useDesktopState() {
         preserveMissing: options.silent === true,
       })
       setPersistedMessagesForThread(threadId, mergedMessages)
+      reconcileOptimisticUserMessages(threadId, mergedMessages)
 
       const previousLiveAgent = liveAgentMessagesByThreadId.value[threadId] ?? []
       const nextLiveAgent = removeRedundantLiveAgentMessages(previousLiveAgent, nextMessages)
@@ -2627,13 +2326,18 @@ export function useDesktopState() {
     if (isInProgress && mode === 'queue') {
       const queue = queuedMessagesByThreadId.value[threadId] ?? []
       const id = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      setQueuedMessagesForThread(threadId, [...queue, { id, text: nextText, imageUrls, skills, fileAttachments }])
+      queuedMessagesByThreadId.value = {
+        ...queuedMessagesByThreadId.value,
+        [threadId]: [...queue, { id, text: nextText, imageUrls, skills, fileAttachments }],
+      }
       return
     }
 
     if (isInProgress) {
+      const optimisticMessageId = addOptimisticUserMessage(threadId, nextText, imageUrls, fileAttachments)
       shouldAutoScrollOnNextAgentEvent = true
       void startTurnForThread(threadId, nextText, imageUrls, skills, fileAttachments).catch((unknownError) => {
+        removeOptimisticUserMessage(threadId, optimisticMessageId)
         const errorMessage = unknownError instanceof Error ? unknownError.message : 'Unknown application error'
         setTurnErrorForThread(threadId, errorMessage)
         error.value = errorMessage
@@ -2642,6 +2346,7 @@ export function useDesktopState() {
     }
 
     error.value = ''
+    const optimisticMessageId = addOptimisticUserMessage(threadId, nextText, imageUrls, fileAttachments)
     shouldAutoScrollOnNextAgentEvent = true
     setTurnSummaryForThread(threadId, null)
     setTurnActivityForThread(
@@ -2654,6 +2359,7 @@ export function useDesktopState() {
     try {
       await startTurnForThread(threadId, nextText, imageUrls, skills, fileAttachments)
     } catch (unknownError) {
+      removeOptimisticUserMessage(threadId, optimisticMessageId)
       shouldAutoScrollOnNextAgentEvent = false
       setThreadInProgress(threadId, false)
       setTurnActivityForThread(threadId, null)
@@ -2674,20 +2380,20 @@ export function useDesktopState() {
     const nextText = text.trim()
     const targetCwd = cwd.trim()
     const selectedModel = selectedModelId.value.trim()
-    const executionPrefs = getProjectExecutionPrefs(targetCwd)
     if (!nextText && imageUrls.length === 0 && fileAttachments.length === 0) return ''
 
     isSendingMessage.value = true
     error.value = ''
     let threadId = ''
+    let optimisticMessageId = ''
 
     try {
       try {
-        threadId = await startThread(targetCwd || undefined, selectedModel || undefined, executionPrefs)
+        threadId = await startThread(targetCwd || undefined, selectedModel || undefined)
       } catch (unknownError) {
         if (selectedModel && selectedModel !== MODEL_FALLBACK_ID && isUnsupportedChatGptModelError(unknownError)) {
           await applyFallbackModelSelection()
-          threadId = await startThread(targetCwd || undefined, MODEL_FALLBACK_ID, executionPrefs)
+          threadId = await startThread(targetCwd || undefined, MODEL_FALLBACK_ID)
         } else {
           throw unknownError
         }
@@ -2695,6 +2401,7 @@ export function useDesktopState() {
       if (!threadId) return ''
 
       insertOptimisticThread(threadId, targetCwd, nextText || '[Image]')
+      optimisticMessageId = addOptimisticUserMessage(threadId, nextText, imageUrls, fileAttachments)
       resumedThreadById.value = {
         ...resumedThreadById.value,
         [threadId]: true,
@@ -2713,6 +2420,9 @@ export function useDesktopState() {
       const capturedPrompt = nextText
       void startTurnForThread(threadId, nextText, imageUrls, skills, fileAttachments)
         .catch((unknownError) => {
+          if (optimisticMessageId) {
+            removeOptimisticUserMessage(threadId, optimisticMessageId)
+          }
           shouldAutoScrollOnNextAgentEvent = false
           setThreadInProgress(threadId, false)
           setTurnActivityForThread(threadId, null)
@@ -2728,6 +2438,9 @@ export function useDesktopState() {
     } catch (unknownError) {
       shouldAutoScrollOnNextAgentEvent = false
       if (threadId) {
+        if (optimisticMessageId) {
+          removeOptimisticUserMessage(threadId, optimisticMessageId)
+        }
         setThreadInProgress(threadId, false)
         setTurnActivityForThread(threadId, null)
       }
@@ -2750,7 +2463,6 @@ export function useDesktopState() {
   ): Promise<void> {
     const modelId = selectedModelId.value.trim()
     const reasoningEffort = selectedReasoningEffort.value
-    const executionPrefs = getProjectExecutionPrefs(getThreadCwd(threadId))
     const normalizedText = nextText.trim()
     const normalizedSkills = skills.map((skill) => ({ name: skill.name, path: skill.path }))
     const normalizedFileAttachments = fileAttachments.map((file) => ({ ...file }))
@@ -2778,11 +2490,6 @@ export function useDesktopState() {
           reasoningEffort || undefined,
           skills.length > 0 ? skills : undefined,
           fileAttachments,
-          {
-            approvalPolicy: executionPrefs.approvalPolicy,
-            sandboxMode: executionPrefs.sandboxMode,
-            cwd: getThreadCwd(threadId),
-          },
         )
       } catch (unknownError) {
         if (modelId && modelId !== MODEL_FALLBACK_ID && isUnsupportedChatGptModelError(unknownError)) {
@@ -2803,11 +2510,6 @@ export function useDesktopState() {
             reasoningEffort || undefined,
             skills.length > 0 ? skills : undefined,
             fileAttachments,
-            {
-              approvalPolicy: executionPrefs.approvalPolicy,
-              sandboxMode: executionPrefs.sandboxMode,
-              cwd: getThreadCwd(threadId),
-            },
           )
         } else {
           throw unknownError
@@ -2831,7 +2533,9 @@ export function useDesktopState() {
     const queue = queuedMessagesByThreadId.value[threadId]
     if (!queue || queue.length === 0) return
     const [next, ...rest] = queue
-    setQueuedMessagesForThread(threadId, rest)
+    queuedMessagesByThreadId.value = rest.length > 0
+      ? { ...queuedMessagesByThreadId.value, [threadId]: rest }
+      : omitKey(queuedMessagesByThreadId.value, threadId)
     isSendingMessage.value = true
     error.value = ''
     shouldAutoScrollOnNextAgentEvent = true
@@ -3169,6 +2873,7 @@ export function useDesktopState() {
     activeReasoningItemId = ''
     shouldAutoScrollOnNextAgentEvent = false
     persistedMessagesByThreadId.value = {}
+    optimisticUserMessagesByThreadId.value = {}
     liveAgentMessagesByThreadId.value = {}
     liveReasoningTextByThreadId.value = {}
     liveCommandsByThreadId.value = {}
@@ -3176,6 +2881,7 @@ export function useDesktopState() {
     turnSummaryByThreadId.value = {}
     turnErrorByThreadId.value = {}
     activeTurnIdByThreadId.value = {}
+    queuedMessagesByThreadId.value = {}
   }
 
   const selectedThreadQueuedMessages = computed<QueuedMessage[]>(() => {
@@ -3190,7 +2896,9 @@ export function useDesktopState() {
     const queue = queuedMessagesByThreadId.value[threadId]
     if (!queue) return
     const next = queue.filter((m) => m.id !== messageId)
-    setQueuedMessagesForThread(threadId, next)
+    queuedMessagesByThreadId.value = next.length > 0
+      ? { ...queuedMessagesByThreadId.value, [threadId]: next }
+      : omitKey(queuedMessagesByThreadId.value, threadId)
   }
 
   function steerQueuedMessage(messageId: string): void {
@@ -3237,8 +2945,6 @@ export function useDesktopState() {
     selectedThreadQueuedMessages,
     removeQueuedMessage,
     steerQueuedMessage,
-    getProjectExecutionPrefs,
-    updateProjectExecutionPrefs,
     setSelectedModelId,
     setSelectedReasoningEffort,
     respondToPendingServerRequest,

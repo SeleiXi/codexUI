@@ -438,6 +438,41 @@ function getCodexGlobalStatePath(): string {
   return join(getCodexHomeDir(), '.codex-global-state.json')
 }
 
+function shouldDegradeRateLimitsError(method: string, error: unknown): boolean {
+  if (method !== 'account/rateLimits/read') return false
+  const message = getErrorMessage(error, '').toLowerCase()
+  if (!message) return false
+  return (
+    message.includes('failed to fetch codex rate limits') ||
+    message.includes('wham/usage failed') ||
+    (message.includes('403 forbidden') && message.includes('chatgpt.com'))
+  )
+}
+
+function buildEmptyRateLimitsPayload(): {
+  rateLimits: {
+    limitId: string | null
+    limitName: string | null
+    primary: null
+    secondary: null
+    credits: null
+    planType: null
+  }
+  rateLimitsByLimitId: Record<string, never>
+} {
+  return {
+    rateLimits: {
+      limitId: null,
+      limitName: null,
+      primary: null,
+      secondary: null,
+      credits: null,
+      planType: null,
+    },
+    rateLimitsByLimitId: {},
+  }
+}
+
 function getCodexSessionIndexPath(): string {
   return join(getCodexHomeDir(), 'session_index.jsonl')
 }
@@ -1014,7 +1049,14 @@ class AppServerProcess {
 
   async rpc(method: string, params: unknown): Promise<unknown> {
     await this.ensureInitialized()
-    return this.call(method, params)
+    try {
+      return await this.call(method, params)
+    } catch (error) {
+      if (shouldDegradeRateLimitsError(method, error)) {
+        return buildEmptyRateLimitsPayload()
+      }
+      throw error
+    }
   }
 
   onNotification(listener: (value: { method: string; params: unknown }) => void): () => void {
